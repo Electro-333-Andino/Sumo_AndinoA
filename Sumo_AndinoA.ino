@@ -12,15 +12,14 @@
 #define PIN_IN3 5
 #define PIN_IN4 6
 
-// --- NUEVA CALIBRACIÓN DE VELOCIDAD (0 a 1023) ---
-// CAMBIO: Ahora usamos uint16_t. Tienes un control mucho más fino.
-uint16_t VELOCIDAD_IZQUIERDA = 1023; // 100%
-uint16_t VELOCIDAD_DERECHA   = 1023; // 100%
-uint16_t VELOCIDAD_GIRO      = 800;  // Aprox 80% de velocidad para giros controlados
+// --- CALIBRACIÓN DE VELOCIDAD BASE POR DEFECTO (0 a 1023) ---
+uint16_t VELOCIDAD_IZQUIERDA = 1023;
+uint16_t VELOCIDAD_DERECHA   = 1023;
+uint16_t VELOCIDAD_GIRO      = 800;
 
 StatusLed ledEstado(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4);
-BleManager bluetooth("Andino_Sumo");
+BleManager bluetooth("Andino_Sumo_X");
 
 void setup() {
   Serial.begin(115200);
@@ -29,7 +28,7 @@ void setup() {
   robot.begin();
   bluetooth.begin();
 
-  Serial.println("Sistema iniciado. Esperando conexión...");
+  Serial.println("Sistema iniciado. Modo velocidad independiente activo (Core 3.0+).");
 }
 
 void loop() {
@@ -37,31 +36,58 @@ void loop() {
   ledEstado.update();
 
   if (bluetooth.hasNewCommand()) {
-    char comando = bluetooth.getCommand();
+    String paquete = bluetooth.getCommand();
 
+    // Parada de emergencia automática por pérdida de enlace
     if (!bluetooth.isConnected()) {
-      comando = 'S';
+      paquete = "S,0,0";
     }
+
+    char comando = 'S';
+    int vIzqInput = VELOCIDAD_IZQUIERDA;
+    int vDerInput = VELOCIDAD_DERECHA;
+
+    // PARSEADOR: Descompone el paquete de datos (Ej de entrada de la app: "F,1023,650")
+    int camposLeidos = sscanf(paquete.c_str(), "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
+
+    // Acotación estricta de seguridad dentro del espectro de modulación del PWM (0 a 1023)
+    uint16_t speedL = constrain(vIzqInput, 0, 1023);
+    uint16_t speedR = constrain(vDerInput, 0, 1023);
 
     switch(comando) {
       case 'F':
-        robot.moveForward(VELOCIDAD_IZQUIERDA, VELOCIDAD_DERECHA);
+        robot.moveForward(speedL, speedR);
         break;
+
       case 'B':
-        robot.moveBackward(VELOCIDAD_IZQUIERDA, VELOCIDAD_DERECHA);
+        robot.moveBackward(speedL, speedR);
         break;
+
       case 'L':
-        robot.turnLeft(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        if (camposLeidos == 3) {
+          robot.turnLeft(speedL, speedR);
+        } else {
+          robot.turnLeft(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        }
         break;
+
       case 'R':
-        robot.turnRight(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        if (camposLeidos == 3) {
+          robot.turnRight(speedL, speedR);
+        } else {
+          robot.turnRight(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        }
         break;
+
       case 'S':
-        robot.stop();
-        break;
       default:
         robot.stop();
         break;
     }
+
+    // Telemetría en el monitor serie para comprobar el control en tiempo real
+    Serial.print("Cmd: "); Serial.print(comando);
+    Serial.print(" | Motor Izq: "); Serial.print(speedL);
+    Serial.print(" | Motor Der: "); Serial.println(speedR);
   }
 }

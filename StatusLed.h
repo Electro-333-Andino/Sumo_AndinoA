@@ -4,17 +4,16 @@
 #include <Arduino.h>
 
 class StatusLed {
-  private:
-    uint8_t pin;
-    bool isConnected;
-    unsigned long previousMillis;
-    const long interval = 500; // Medio segundo de parpadeo
-    bool ledState;
+private:
+    uint8_t ledPin;
+    unsigned long ultimoParpadeo;
+    bool estadoLed;
+    bool conectado;
 
-  public:
+public:
     StatusLed(uint8_t pin);
     void begin();
-    void setConnected(bool connected);
+    void setConnected(bool state);
     void update();
 };
 

@@ -1,26 +1,25 @@
 #include "StatusLed.h"
 
-StatusLed::StatusLed(uint8_t pin) : pin(pin), isConnected(false), previousMillis(0), ledState(false) {}
+StatusLed::StatusLed(uint8_t pin)
+    : ledPin(pin), ultimoParpadeo(0), estadoLed(false), conectado(false) {}
 
 void StatusLed::begin() {
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
+    pinMode(ledPin, OUTPUT);
+    digitalWrite(ledPin, LOW);
 }
 
-void StatusLed::setConnected(bool connected) {
-  isConnected = connected;
-  if (isConnected) {
-    digitalWrite(pin, HIGH); // Fijo cuando está conectado
-  }
+void StatusLed::setConnected(bool state) {
+    conectado = state;
 }
 
+// Control asíncrono y no bloqueante del parpadeo
 void StatusLed::update() {
-  if (isConnected) return; // Si está conectado, no parpadea
+    unsigned long tiempoActual = millis();
+    unsigned long intervalo = conectado ? 600 : 150; // Lento si está conectado, rápido buscando señal
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
-    ledState = !ledState;
-    digitalWrite(pin, ledState);
-  }
+    if (tiempoActual - ultimoParpadeo >= intervalo) {
+        ultimoParpadeo = tiempoActual;
+        estadoLed = !estadoLed;
+        digitalWrite(ledPin, estadoLed ? HIGH : LOW);
+    }
 }

@@ -5,25 +5,23 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
 
 class BleManager {
-  private:
-    const char* deviceName;
-    char lastCommand;
-    bool connected;
-    bool commandReady;
-
-  public:
+public:
     BleManager(const char* name);
     void begin();
     bool isConnected();
     bool hasNewCommand();
-    char getCommand();
+    String getCommand(); // Retorna el String del paquete completo recibido
 
-    // Callbacks públicos pero usados internamente
     void setConnectionState(bool state);
-    void setReceivedCommand(char cmd);
+    void setReceivedCommand(String cmd);
+
+private:
+    const char* deviceName;
+    String lastCommand;
+    bool connected;
+    bool commandReady;
 };
 
 #endif
