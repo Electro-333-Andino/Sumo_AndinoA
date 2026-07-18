@@ -12,49 +12,81 @@
 #define PIN_IN3 5
 #define PIN_IN4 6
 
+#define PIN_STBY 7
+
+// Si está conectado pero no llega ningún comando en este tiempo, se frena solo.
+#define COMMAND_TIMEOUT_MS 400
+
 // --- CALIBRACIÓN DE VELOCIDAD BASE POR DEFECTO (0 a 1023) ---
 uint16_t VELOCIDAD_IZQUIERDA = 1023;
 uint16_t VELOCIDAD_DERECHA   = 1023;
 uint16_t VELOCIDAD_GIRO      = 800;
 
 StatusLed ledEstado(PIN_LED);
-MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4);
+MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
 BleManager bluetooth("Andino_Sumo_X");
+
+// Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea),
+// por eso solo toca pines directamente, nada de heap ni Strings aquí.
+void safetyStop() {
+  robot.emergencyStop(); // corte duro: STBY a LOW, el TB6612 queda en alta impedancia
+}
 
 void setup() {
   Serial.begin(115200);
 
   ledEstado.begin();
-  robot.begin();
+  robot.begin(); // carga los trims guardados en NVS
+  bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
 
-  Serial.println("Sistema iniciado. Modo velocidad independiente activo (Core 3.0+).");
+  Serial.println("Sistema iniciado. Trims cargados:");
+  Serial.print("  LF="); Serial.print(robot.getTrim('L', 'F'));
+  Serial.print("  LB="); Serial.print(robot.getTrim('L', 'B'));
+  Serial.print("  RF="); Serial.print(robot.getTrim('R', 'F'));
+  Serial.print("  RB="); Serial.println(robot.getTrim('R', 'B'));
 }
 
 void loop() {
   ledEstado.setConnected(bluetooth.isConnected());
   ledEstado.update();
 
-  if (bluetooth.hasNewCommand()) {
-    String paquete = bluetooth.getCommand();
+  // Watchdog: conectado pero sin comandos nuevos por demasiado tiempo -> frenar
+  if (bluetooth.isConnected() && bluetooth.millisSinceLastCommand() > COMMAND_TIMEOUT_MS) {
+    robot.emergencyStop();
+  }
 
-    // Parada de emergencia automática por pérdida de enlace
-    if (!bluetooth.isConnected()) {
-      paquete = "S,0,0";
+  char paquete[BLE_CMD_BUFFER_SIZE];
+  if (bluetooth.getCommand(paquete, sizeof(paquete))) {
+
+    // --- COMANDO DE CALIBRACIÓN: "T,LF,0.91" ---
+    if (strncmp(paquete, "T,", 2) == 0) {
+      if (strcmp(paquete, "T,RESET") == 0) {
+        robot.resetCalibration();
+        Serial.println("Trims reseteados a 1.0");
+      } else {
+        char motor, dir;
+        float valor;
+        if (sscanf(paquete, "T,%c%c,%f", &motor, &dir, &valor) == 3) {
+          robot.setTrim(motor, dir, valor);
+          robot.saveCalibration();
+          Serial.print("Trim guardado "); Serial.print(motor); Serial.print(dir);
+          Serial.print(" = "); Serial.println(valor);
+        }
+      }
+      return; // no seguir al parser de movimiento
     }
 
     char comando = 'S';
     int vIzqInput = VELOCIDAD_IZQUIERDA;
     int vDerInput = VELOCIDAD_DERECHA;
 
-    // PARSEADOR: Descompone el paquete de datos (Ej de entrada de la app: "F,1023,650")
-    int camposLeidos = sscanf(paquete.c_str(), "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
+    int camposLeidos = sscanf(paquete, "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
 
-    // Acotación estricta de seguridad dentro del espectro de modulación del PWM (0 a 1023)
     uint16_t speedL = constrain(vIzqInput, 0, 1023);
     uint16_t speedR = constrain(vDerInput, 0, 1023);
 
-    switch(comando) {
+    switch (comando) {
       case 'F':
         robot.moveForward(speedL, speedR);
         break;
@@ -85,7 +117,6 @@ void loop() {
         break;
     }
 
-    // Telemetría en el monitor serie para comprobar el control en tiempo real
     Serial.print("Cmd: "); Serial.print(comando);
     Serial.print(" | Motor Izq: "); Serial.print(speedL);
     Serial.print(" | Motor Der: "); Serial.println(speedR);
