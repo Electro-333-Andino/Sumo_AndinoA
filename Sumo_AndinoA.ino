@@ -1,6 +1,23 @@
+/*
+ * Copyright 2026 Anderson Andino
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "StatusLed.h"
 #include "MotorController.h"
 #include "BleManager.h"
+#include "SafetyManager/SafetyManager.h"
 
 #define PIN_LED 8
 
@@ -14,8 +31,8 @@
 
 #define PIN_STBY 7
 
-// Si está conectado pero no llega ningún comando en este tiempo, se frena solo.
-#define COMMAND_TIMEOUT_MS 400
+// Aumentamos el tiempo de espera para mayor tolerancia con apps de control manual
+#define COMMAND_TIMEOUT_MS 1500
 
 // --- CALIBRACIÓN DE VELOCIDAD BASE POR DEFECTO (0 a 1023) ---
 uint16_t VELOCIDAD_IZQUIERDA = 1023;
@@ -25,6 +42,7 @@ uint16_t VELOCIDAD_GIRO      = 800;
 StatusLed ledEstado(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
 BleManager bluetooth("Andino_Sumo_X");
+SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 
 // Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea),
 // por eso solo toca pines directamente, nada de heap ni Strings aquí.
@@ -51,10 +69,8 @@ void loop() {
   ledEstado.setConnected(bluetooth.isConnected());
   ledEstado.update();
 
-  // Watchdog: conectado pero sin comandos nuevos por demasiado tiempo -> frenar
-  if (bluetooth.isConnected() && bluetooth.millisSinceLastCommand() > COMMAND_TIMEOUT_MS) {
-    robot.emergencyStop();
-  }
+  // Watchdog: supervisa la recepción de comandos
+  safety.check();
 
   char paquete[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(paquete, sizeof(paquete))) {
