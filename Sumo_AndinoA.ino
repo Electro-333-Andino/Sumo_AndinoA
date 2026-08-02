@@ -17,7 +17,7 @@
 #include "StatusLed.h"
 #include "MotorController.h"
 #include "BleManager.h"
-#include "SafetyManager/SafetyManager.h"
+#include "SafetyManager.h"
 
 #define PIN_LED 8
 
