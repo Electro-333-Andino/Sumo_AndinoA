@@ -41,7 +41,7 @@ uint16_t VELOCIDAD_GIRO      = 800;
 
 StatusLed ledEstado(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
-BleManager bluetooth("Nightmares");
+BleManager bluetooth("SumoAndinoA");
 SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 
 // Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea),
