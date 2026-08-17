@@ -14,7 +14,6 @@ Este proyecto es ideal para estudiantes, aficionados y entusiastas que se están
 
 *   **🎓 Diseñado para el Aprendizaje:** Código limpio, modular y documentado, ideal para quienes están dando sus primeros pasos en programación de robots de competencia.
 *   **📱 Control Inalámbrico BLE:** Permite controlar el robot en tiempo real mediante cualquier aplicación móvil compatible con Bluetooth Low Energy (BLE). El robot se anuncia en la red como **"SumoAndinoA"** (nombre personalizable en el código).
-*   **⚖️ Calibración de Motores Sencilla (Trims):** En robótica de nivel principiante, es muy común que un motor gire un poco más rápido que el otro debido a diferencias físicas. **SumoAndinoA** incluye un sistema de calibración dinámico (Trims) que permite emparejar los motores enviando comandos sencillos. ¡Los valores se guardan automáticamente en la memoria del ESP32 y no se borran al apagar el robot!
 *   **🛡️ Seguridad Integrada (Anti-Escape):**
     *   **Freno por Desconexión:** Si el teléfono se desconecta, el robot frena al instante en microsegundos.
     *   **Watchdog de Seguridad:** Si dejas de enviar comandos durante **1.5 segundos**, el robot se detendrá de manera preventiva para evitar que choque o escape del Tatami (Dojo).
@@ -53,13 +52,6 @@ Envía comandos con el formato: `DIRECCIÓN,VEL_IZQ,VEL_DER` (Rango de velocidad
 *   **Giro Izquierda:** `L` (Gira sobre su propio eje a la izquierda).
 *   **Giro Derecha:** `R` (Gira sobre su propio eje a la derecha).
 *   **Detener:** `S` (Frena en seco).
-
-### 2. Comandos de Calibración (Ajuste de marcha recta)
-Si notas que al presionar "Adelante" el robot se desvía hacia un lado, puedes calibrar los motores enviando un trim de compensación (un valor decimal entre `0.30` y `1.00`):
-
-*   **Calibrar Motor Izquierdo Adelante:** `T,LF,0.92` (Reduce la velocidad del motor izquierdo al 92% para emparejarlo con el derecho).
-*   **Calibrar Motor Derecho Atrás:** `T,RB,0.95`
-*   **Restablecer todo:** `T,RESET` (Borra los ajustes y los vuelve a dejar al 100%).
 
 ---
 

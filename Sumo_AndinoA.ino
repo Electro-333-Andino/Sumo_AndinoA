@@ -82,17 +82,11 @@ void setup() {
   Serial.begin(115200);
 
   ledEstado.begin();
-  robot.begin(); // carga los trims guardados en NVS
+  robot.begin();
   bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
   gamepad.setStopCallback(gamepadStop);
   gamepad.begin(); // DESPUÉS de bluetooth.begin(): BLEDevice ya está iniciado
-
-  Serial.println("Sistema iniciado. Trims cargados:");
-  Serial.print("  LF="); Serial.print(robot.getTrim('L', 'F'));
-  Serial.print("  LB="); Serial.print(robot.getTrim('L', 'B'));
-  Serial.print("  RF="); Serial.print(robot.getTrim('R', 'F'));
-  Serial.print("  RB="); Serial.println(robot.getTrim('R', 'B'));
 }
 
 void loop() {
@@ -137,24 +131,6 @@ void loop() {
   char paquete[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(paquete, sizeof(paquete))) {
 
-    // --- COMANDO DE CALIBRACIÓN: "T,LF,0.91" (siempre disponible) ---
-    if (strncmp(paquete, "T,", 2) == 0) {
-      if (strcmp(paquete, "T,RESET") == 0) {
-        robot.resetCalibration();
-        Serial.println("Trims reseteados a 1.0");
-      } else {
-        char motor, dir;
-        float valor;
-        if (sscanf(paquete, "T,%c%c,%f", &motor, &dir, &valor) == 3) {
-          robot.setTrim(motor, dir, valor);
-          robot.saveCalibration();
-          Serial.print("Trim guardado "); Serial.print(motor); Serial.print(dir);
-          Serial.print(" = "); Serial.println(valor);
-        }
-      }
-      return; // no seguir al parser de movimiento
-    }
-
     char comando = 'S';
     int vIzqInput = VELOCIDAD_IZQUIERDA;
     int vDerInput = VELOCIDAD_DERECHA;
@@ -174,8 +150,8 @@ void loop() {
     }
 
     // Mando conectado = fuente de control activa: se ignoran los comandos
-    // de movimiento del teléfono (la calibración y la velocidad configurada
-    // sí se procesan, como se ve arriba).
+    // de movimiento del teléfono (la velocidad configurada sí se procesa,
+    // como se ve arriba).
     if (gamepad.isConnected()) {
       return;
     }

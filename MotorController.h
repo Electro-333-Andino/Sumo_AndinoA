@@ -18,7 +18,6 @@
 #define MOTOR_CONTROLLER_H
 
 #include <Arduino.h>
-#include <Preferences.h>
 
 class MotorController {
 private:
@@ -30,18 +29,6 @@ private:
     // Configuración para el PWM en la API Core 3.0+
     const uint32_t pwmFreq = 5000;    // 5 kHz
     const uint8_t pwmResolution = 10; // 10 bits (Rango de velocidad: 0 a 1023)
-
-    // --- TRIMS DE CALIBRACIÓN (1.0 = sin corrección) ---
-    // Un factor por motor y por sentido, porque la asimetría del puente H
-    // suele ser distinta en adelante que en atrás.
-    float trimLF = 1.0f; // Izquierda, Adelante
-    float trimLB = 1.0f; // Izquierda, Atrás
-    float trimRF = 1.0f; // Derecha, Adelante
-    float trimRB = 1.0f; // Derecha, Atrás
-
-    Preferences prefs;
-
-    uint16_t applyTrim(uint16_t speed, float trim);
 
 public:
     // Constructor de la clase
@@ -60,7 +47,7 @@ public:
     bool isDriverEnabled();
 
     // Métodos de movimiento con control independiente de velocidad (0 - 1023)
-    // Los valores recibidos son "lógicos"; el trim se aplica internamente.
+    // Los valores recibidos se aplican tal cual al PWM (0 - 1023).
     // Cada uno re-habilita el driver automáticamente por si venía de un emergencyStop().
     void moveForward(uint16_t speedLeft, uint16_t speedRight);
     void moveBackward(uint16_t speedLeft, uint16_t speedRight);
@@ -69,17 +56,7 @@ public:
 
     // Mezcla diferencial proporcional: velocidades y sentidos independientes
     // por motor. Positivo = adelante, negativo = atrás (rango interno ±1023).
-    // Aplica el trim correspondiente a cada motor y sentido, como el resto
-    // de métodos de movimiento.
     void setMotorSpeeds(int16_t speedLeft, int16_t speedRight);
-
-    // --- Calibración ---
-    // motor: 'L' o 'R'   dir: 'F' (forward) o 'B' (backward)   value: 0.0 - 1.0
-    void setTrim(char motor, char dir, float value);
-    float getTrim(char motor, char dir);
-    void loadCalibration();
-    void saveCalibration();
-    void resetCalibration();
 };
 
 #endif
