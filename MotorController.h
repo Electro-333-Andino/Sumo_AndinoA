@@ -67,6 +67,12 @@ public:
     void turnLeft(uint16_t speedLeft, uint16_t speedRight);
     void turnRight(uint16_t speedLeft, uint16_t speedRight);
 
+    // Mezcla diferencial proporcional: velocidades y sentidos independientes
+    // por motor. Positivo = adelante, negativo = atrás (rango interno ±1023).
+    // Aplica el trim correspondiente a cada motor y sentido, como el resto
+    // de métodos de movimiento.
+    void setMotorSpeeds(int16_t speedLeft, int16_t speedRight);
+
     // --- Calibración ---
     // motor: 'L' o 'R'   dir: 'F' (forward) o 'B' (backward)   value: 0.0 - 1.0
     void setTrim(char motor, char dir, float value);

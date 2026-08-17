@@ -109,6 +109,42 @@ void MotorController::turnRight(uint16_t speedLeft, uint16_t speedRight) {
   ledcWrite(pinEnb, applyTrim(speedRight, trimRB));
 }
 
+void MotorController::setMotorSpeeds(int16_t speedLeft, int16_t speedRight) {
+  speedLeft = constrain(speedLeft, -1023, 1023);
+  speedRight = constrain(speedRight, -1023, 1023);
+
+  if (speedLeft == 0 && speedRight == 0) {
+    stop();
+    return;
+  }
+
+  enableDriver(); // re-habilita el driver por si venía de un emergencyStop()
+
+  // Motor izquierdo: sentido según el signo, trim según el sentido
+  if (speedLeft > 0) {
+    digitalWrite(pinIn1, HIGH); digitalWrite(pinIn2, LOW);
+    ledcWrite(pinEna, applyTrim((uint16_t)speedLeft, trimLF));
+  } else if (speedLeft < 0) {
+    digitalWrite(pinIn1, LOW); digitalWrite(pinIn2, HIGH);
+    ledcWrite(pinEna, applyTrim((uint16_t)(-speedLeft), trimLB));
+  } else {
+    digitalWrite(pinIn1, LOW); digitalWrite(pinIn2, LOW);
+    ledcWrite(pinEna, 0);
+  }
+
+  // Motor derecho: igual, con sus propios pines y trims
+  if (speedRight > 0) {
+    digitalWrite(pinIn3, HIGH); digitalWrite(pinIn4, LOW);
+    ledcWrite(pinEnb, applyTrim((uint16_t)speedRight, trimRF));
+  } else if (speedRight < 0) {
+    digitalWrite(pinIn3, LOW); digitalWrite(pinIn4, HIGH);
+    ledcWrite(pinEnb, applyTrim((uint16_t)(-speedRight), trimRB));
+  } else {
+    digitalWrite(pinIn3, LOW); digitalWrite(pinIn4, LOW);
+    ledcWrite(pinEnb, 0);
+  }
+}
+
 // ---------------- Calibración ----------------
 
 void MotorController::setTrim(char motor, char dir, float value) {

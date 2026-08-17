@@ -27,9 +27,16 @@ public:
         : robot(motor), bluetooth(ble), timeout(timeoutMs) {}
 
     void check() {
-        if (bluetooth.isConnected() && bluetooth.millisSinceLastCommand() > timeout) {
+        // El watchdog del teléfono solo aplica cuando el mando NO está al mando:
+        // con el gamepad activo, el failsafe lo gestiona GamepadController
+        // (GAMEPAD_TIMEOUT_MS), mucho más agresivo que este timeout.
+        if (!gamepadActive && bluetooth.isConnected() && bluetooth.millisSinceLastCommand() > timeout) {
             robot.emergencyStop();
         }
+    }
+
+    void setGamepadActive(bool active) {
+        gamepadActive = active;
     }
 
     void setTimeout(unsigned long newTimeout) {
@@ -40,6 +47,7 @@ private:
     MotorController& robot;
     BleManager& bluetooth;
     unsigned long timeout;
+    bool gamepadActive = false;
 };
 
 #endif
