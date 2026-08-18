@@ -21,7 +21,7 @@
 #include "GamepadController.h"
 #include "GamepadMixer.h"
 
-// --- CONFIGURACIÓN DE PINES ---
+// --- PIN CONFIGURATION ---
 #define PIN_LED  8
 #define PIN_ENA  0
 #define PIN_IN1  1
@@ -31,75 +31,76 @@
 #define PIN_IN4  6
 #define PIN_STBY 7
 
-// Watchdog del teléfono: si deja de enviar comandos durante este tiempo, parada preventiva
+// Phone watchdog: if no command arrives within this time, preventive stop
 #define COMMAND_TIMEOUT_MS 1500
 
-// --- VELOCIDADES POR DEFECTO (0 a 1023) ---
-uint16_t VELOCIDAD_IZQUIERDA = 1023;
-uint16_t VELOCIDAD_DERECHA   = 1023;
-uint16_t VELOCIDAD_GIRO      = 1023;
+// --- DEFAULT SPEEDS (0 to 1023) ---
+uint16_t DEFAULT_SPEED_LEFT   = 1023;
+uint16_t DEFAULT_SPEED_RIGHT  = 1023;
+uint16_t DEFAULT_TURN_SPEED   = 1023;
 
-// DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZED/OUTPUT por Serial; 0 = silencio
+// GAMEPAD DEBUG: 1 = print RAW/NORMALIZED/OUTPUT over Serial; 0 = silent
 #ifndef GAMEPAD_DEBUG
 #define GAMEPAD_DEBUG 1
 #endif
 
-// --- INSTANCIACIÓN ---
-StatusLed ledEstado(PIN_LED);
+// --- INSTANTIATION ---
+StatusLed statusLed(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
 BleManager bluetooth("SumoAndinoA");
 SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 GamepadController gamepad;
 GamepadMixer mixer;
 
-// Velocidad máxima que usa el mando. La configura el teléfono con sus comandos
-// de movimiento (p. ej. "F,700,700" -> 700). Por defecto: 1023.
+// Maximum speed used by the gamepad. It is set by the phone with its movement
+// commands (e.g. "F,700,700" -> 700). Default: 1023.
 uint16_t configuredSpeed = 1023;
 
-// --- CALLBACKS DE SEGURIDAD ---
-// Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea):
-// solo toca pines, nada de heap ni Strings.
+// --- SAFETY CALLBACKS ---
+// Runs from the BLE disconnect callback (possibly another task):
+// only touches pins, no heap or Strings here.
 void safetyStop() {
-  // Si el mando está conectado, él es la fuente activa: no frenar por el teléfono
+  // If the gamepad is connected it is the active source: do not stop on phone
+  // disconnect.
   if (!gamepad.isConnected()) {
-    robot.emergencyStop(); // corte duro: STBY a LOW, el TB6612 queda en alta impedancia
+    robot.emergencyStop(); // hard cut: STBY LOW, the TB6612 goes high impedance
   }
 }
 
-// El mando invoca este callback ante desconexión, timeout sin reports o antes
-// de un intento de conexión (bloquea loop() unos segundos).
+// The gamepad invokes this callback on disconnect, report timeout or before a
+// connection attempt (which blocks loop() for a few seconds).
 void gamepadStop() {
   robot.emergencyStop();
 }
 
-// --- SUB-RUTINAS DE CONTROL ---
+// --- CONTROL ROUTINES ---
 
-// Comando del teléfono: SIEMPRE se interpreta (para actualizar configuredSpeed),
-// pero solo mueve el robot si el mando no está activo (prioridad del mando).
-void processPhoneCommand(char* paquete, bool padActive) {
-  char comando = 'S';
-  int vIzqInput = VELOCIDAD_IZQUIERDA;
-  int vDerInput = VELOCIDAD_DERECHA;
+// Phone command: ALWAYS parsed (to update configuredSpeed), but only moves the
+// robot when the gamepad is not active (gamepad priority).
+void processPhoneCommand(char* packet, bool padActive) {
+  char command = 'S';
+  int vLeftInput = DEFAULT_SPEED_LEFT;
+  int vRightInput = DEFAULT_SPEED_RIGHT;
 
-  int camposLeidos = sscanf(paquete, "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
+  int fieldsRead = sscanf(packet, "%c,%d,%d", &command, &vLeftInput, &vRightInput);
 
-  uint16_t speedL = constrain(vIzqInput, 0, 1023);
-  uint16_t speedR = constrain(vDerInput, 0, 1023);
+  uint16_t speedL = constrain(vLeftInput, 0, 1023);
+  uint16_t speedR = constrain(vRightInput, 0, 1023);
 
-  // La velocidad configurada por Android se comparte con el mando; se actualiza
-  // siempre (incluso con el mando activo) para que el nuevo límite aplique ya.
-  if ((comando == 'F' || comando == 'B' || comando == 'L' || comando == 'R') &&
-      camposLeidos == 3) {
+  // The speed configured by Android is shared with the gamepad; it is updated
+  // ALWAYS (even with the gamepad active) so the new limit applies at once.
+  if ((command == 'F' || command == 'B' || command == 'L' || command == 'R') &&
+      fieldsRead == 3) {
     uint16_t maxSpeed = max(speedL, speedR);
     if (maxSpeed > 0) configuredSpeed = maxSpeed;
   }
 
-  // Mando conectado = fuente de control activa: no mover motores con el teléfono
+  // Gamepad connected = active control source: do not move motors from phone
   if (padActive) {
     return;
   }
 
-  switch (comando) {
+  switch (command) {
     case 'F':
       robot.moveForward(speedL, speedR);
       break;
@@ -109,18 +110,18 @@ void processPhoneCommand(char* paquete, bool padActive) {
       break;
 
     case 'L':
-      if (camposLeidos == 3) {
+      if (fieldsRead == 3) {
         robot.turnLeft(speedL, speedR);
       } else {
-        robot.turnLeft(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        robot.turnLeft(DEFAULT_TURN_SPEED, DEFAULT_TURN_SPEED);
       }
       break;
 
     case 'R':
-      if (camposLeidos == 3) {
+      if (fieldsRead == 3) {
         robot.turnRight(speedL, speedR);
       } else {
-        robot.turnRight(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+        robot.turnRight(DEFAULT_TURN_SPEED, DEFAULT_TURN_SPEED);
       }
       break;
 
@@ -130,13 +131,13 @@ void processPhoneCommand(char* paquete, bool padActive) {
       break;
   }
 
-  Serial.print("Cmd: "); Serial.print(comando);
-  Serial.print(" | Motor Izq: "); Serial.print(speedL);
-  Serial.print(" | Motor Der: "); Serial.println(speedR);
+  Serial.print("Cmd: "); Serial.print(command);
+  Serial.print(" | Left: "); Serial.print(speedL);
+  Serial.print(" | Right: "); Serial.println(speedR);
 }
 
-// Control con el mando: re-aplica el estado a 50 Hz. Si no llegan reports,
-// GamepadController ya detiene el robot por timeout (200 ms).
+// Gamepad control: re-applies the state at 50 Hz. If no reports arrive,
+// GamepadController already stops the robot by timeout (200 ms).
 void processGamepadControl() {
   static unsigned long lastMotorUpdate = 0;
   static unsigned long lastPadLog = 0;
@@ -152,7 +153,7 @@ void processGamepadControl() {
   robot.setMotorSpeeds(out.left, out.right);
 
 #if GAMEPAD_DEBUG
-  // ~20 líneas/s para no saturar Serial
+  // ~20 lines/s to avoid saturating Serial
   if (now - lastPadLog >= 50) {
     lastPadLog = now;
     Serial.printf("[PAD] RAW LY=%d RX=%d | NLY=%d NRX=%d | L=%d R=%d\n",
@@ -167,37 +168,37 @@ void processGamepadControl() {
 void setup() {
   Serial.begin(115200);
 
-  ledEstado.begin();
+  statusLed.begin();
   robot.begin();
 
   bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
 
   gamepad.setStopCallback(gamepadStop);
-  gamepad.begin(); // DESPUÉS de bluetooth.begin(): BLEDevice ya está iniciado
+  gamepad.begin(); // AFTER bluetooth.begin(): BLEDevice is already initialized
 
-  Serial.println("Sistema listo - Modo: Control dual");
+  Serial.println("System ready - Dual control mode");
 }
 
 void loop() {
-  // 1. Estado fresco del mando (escaneo/conexión/reports)
+  // 1. Fresh gamepad state (scan/connect/reports)
   gamepad.update();
 
-  // 2. Fuente de control activa y LED
+  // 2. Active control source and LED
   bool isPadActive = gamepad.isConnected();
-  ledEstado.setConnected(bluetooth.isConnected() || isPadActive);
-  ledEstado.update();
+  statusLed.setConnected(bluetooth.isConnected() || isPadActive);
+  statusLed.update();
 
   safety.setGamepadActive(isPadActive);
   safety.check();
 
-  // 3. Teléfono: siempre se lee; mueve solo si el mando no está activo
-  char paquete[BLE_CMD_BUFFER_SIZE];
-  if (bluetooth.getCommand(paquete, sizeof(paquete))) {
-    processPhoneCommand(paquete, isPadActive);
+  // 3. Phone: always read; moves only if the gamepad is not active
+  char packet[BLE_CMD_BUFFER_SIZE];
+  if (bluetooth.getCommand(packet, sizeof(packet))) {
+    processPhoneCommand(packet, isPadActive);
   }
 
-  // 4. Mando: prioridad sobre el teléfono
+  // 4. Gamepad: priority over the phone
   if (isPadActive) {
     processGamepadControl();
   }

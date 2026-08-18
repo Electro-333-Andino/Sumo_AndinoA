@@ -94,7 +94,12 @@ void BleManager::begin() {
 
 void BleManager::setConnectionState(bool state) {
     connected = state;
-    if (!state && safetyStopCb != nullptr) {
+    if (state) {
+        // Al conectarse el teléfono puede tardar en enviar su primer comando:
+        // reiniciar el contador evita un falso disparo del watchdog
+        // (millis() - 0 sería un valor enorme en millisSinceLastCommand()).
+        lastCommandMillis = millis();
+    } else if (safetyStopCb != nullptr) {
         safetyStopCb(); // Frena motores en el instante mismo de la desconexión
     }
 }

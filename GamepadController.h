@@ -46,6 +46,14 @@
 // Tamaño máximo de un HID report (los de gamepads suelen ser <= 20 bytes)
 #define GAMEPAD_MAX_REPORT_LEN 20
 
+// Timeout de cada intento de conexión en milisegundos (client->connect() es
+// bloqueante para loop()). En competencia conviene un valor corto: 2000 ms
+// evita perder el combate esperando una reconexión que no llega; subirlo a
+// 4000-5000 ms da más margen en entornos con mucha interferencia RF.
+#ifndef GAMEPAD_CONNECT_TIMEOUT_MS
+#define GAMEPAD_CONNECT_TIMEOUT_MS 2000
+#endif
+
 // Callback de seguridad: se invoca para detener el robot ante
 // desconexión del mando, timeout de reports o antes de un intento
 // de conexión (porque este es bloqueante y congela loop()).
@@ -65,7 +73,7 @@ public:
 
     // Máquina de estados: escaneo -> conexión -> suscripción -> reports.
     // Llamar desde loop(). Durante un intento de conexión puede bloquear
-    // hasta GAMEPAD_CONNECT_TIMEOUT_S; antes de eso invoca stopCb.
+    // hasta GAMEPAD_CONNECT_TIMEOUT_MS; antes de eso invoca stopCb.
     void update();
 
     bool isConnected();
@@ -85,7 +93,7 @@ private:
 
     void startScan();
     void connectToPad();
-    void cleanupClient();
+    void disconnectClient();
 
     BLEScan* scan;
     BLEClient* client;

@@ -23,14 +23,19 @@ static GamepadController* instance = nullptr;
 // Duración de cada ciclo de escaneo (async, no bloquea loop())
 static constexpr uint8_t GAMEPAD_SCAN_TIME_S = 2;
 
-// Timeout de cada intento de conexión (es bloqueante para loop())
-static constexpr uint8_t GAMEPAD_CONNECT_TIMEOUT_S = 4;
-
 // Pausa entre intentos fallidos de escaneo/conexión
 static constexpr uint32_t GAMEPAD_RETRY_DELAY_MS = 3000;
 
-// --- Callbacks del escaneo (se ejecutan en la tarea del stack BLE) ---
+// ---------------------------------------------------------------------------
+// Callbacks BLE.
+//
+// IMPORTANTE: se instancian UNA SOLA VEZ como objetos estáticos (y los de
+// report como función libre) y se reutilizan en cada reconexión. No usar
+// `new` aquí: cada reconexión del mando en una jornada de competencia
+// acumularía heap hasta agotarlo.
+// ---------------------------------------------------------------------------
 
+// Se ejecutan en la tarea del stack BLE; solo marcan flags (thread-safe).
 class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) override {
         if (instance == nullptr) return;
@@ -53,13 +58,14 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
         advertisedDevice.getScan()->stop(); // detiene el escaneo al encontrarlo
         instance->rememberFoundDevice(advertisedDevice.getAddress());
     }
-
-    void onScanComplete(BLEScanResults results) override {
-        if (instance != nullptr) instance->scanStopped();
-    }
 };
 
-// --- Callbacks del cliente BLE ---
+static ScanCallbacks scanCallbacks;
+
+// Callback de fin de escaneo (API del core 3.x: función, no método virtual)
+static void onScanComplete(BLEScanResults results) {
+    if (instance != nullptr) instance->scanStopped();
+}
 
 class ClientCallbacks : public BLEClientCallbacks {
     void onConnect(BLEClient* pClient) override {
@@ -70,11 +76,12 @@ class ClientCallbacks : public BLEClientCallbacks {
     }
 };
 
-class ReportCallbacks : public BLECharacteristicCallbacks {
-    void onNotify(BLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) override {
-        if (instance != nullptr) instance->storeReport(pData, length);
-    }
-};
+static ClientCallbacks clientCallbacks;
+
+// Callback de notifications del HID Report (notify_callback del core 3.x)
+static void onReportNotify(BLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+    if (instance != nullptr) instance->storeReport(pData, length);
+}
 
 // --- Implementación ---
 
@@ -100,10 +107,11 @@ void GamepadController::begin() {
 void GamepadController::startScan() {
     if (scan == nullptr) {
         scan = BLEDevice::getScan();
-        scan->setAdvertisedDeviceCallbacks(new ScanCallbacks());
+        scan->setAdvertisedDeviceCallbacks(&scanCallbacks);
         scan->setActiveScan(true); // escaneo activo: obtenemos el nombre
     }
-    scan->start(GAMEPAD_SCAN_TIME_S, false); // async: no bloquea loop()
+    // Async: no bloquea loop(); al terminar se invoca onScanComplete.
+    scan->start(GAMEPAD_SCAN_TIME_S, onScanComplete);
 }
 
 void GamepadController::update() {
@@ -114,7 +122,7 @@ void GamepadController::update() {
         if (phase == Phase::CONNECTED) {
             connected = false;
             state.connected = false;
-            cleanupClient();
+            disconnectClient();
             phase = Phase::RETRY_WAIT;
             phaseEnteredAt = millis();
             if (stopCb != nullptr) stopCb(); // parada inmediata
@@ -190,13 +198,21 @@ void GamepadController::connectToPad() {
     if (stopCb != nullptr) stopCb();
 
     Serial.println("[GAMEPAD] Connecting...");
-    client = BLEDevice::createClient();
-    client->setClientCallbacks(new ClientCallbacks());
-    client->setConnectTimeout(GAMEPAD_CONNECT_TIMEOUT_S);
 
-    if (!client->connect(padAddress)) {
+    // El cliente se crea una sola vez y se reutiliza en cada reconexión:
+    // evita fugas de heap y es la forma correcta con la API del core 3.x
+    // (no existe BLEDevice::deleteClient()).
+    if (client == nullptr) {
+        client = BLEDevice::createClient();
+        client->setClientCallbacks(&clientCallbacks);
+    } else if (client->isConnected()) {
+        client->disconnect();
+    }
+
+    // connect() es bloqueante; el timeout en ms limita la espera.
+    if (!client->connect(padAddress, 0xFF, GAMEPAD_CONNECT_TIMEOUT_MS)) {
         Serial.println("[GAMEPAD] Connect failed");
-        cleanupClient();
+        client->disconnect();
         phase = Phase::RETRY_WAIT;
         phaseEnteredAt = millis();
         return;
@@ -207,22 +223,23 @@ void GamepadController::connectToPad() {
     BLERemoteService* hidService = client->getService(BLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
     if (hidService == nullptr) {
         Serial.println("[GAMEPAD] HID service not found");
-        cleanupClient();
+        client->disconnect();
         phase = Phase::RETRY_WAIT;
         phaseEnteredAt = millis();
         return;
     }
     Serial.println("[GAMEPAD] HID service found");
 
-    // Suscribirse a notifications de la(s) characteristic(s) de Report
+    // Suscribirse a notifications de la(s) characteristic(s) de Report.
+    // subscribe() falla si la characteristic no tiene CCCD, así que no hace
+    // falta filtrar por propiedades (getProperties() no existe en core 3.x).
     bool subscribed = false;
     std::map<std::string, BLERemoteCharacteristic*>* chars = hidService->getCharacteristics();
     if (chars != nullptr) {
         for (auto& pair : *chars) {
             BLERemoteCharacteristic* ch = pair.second;
-            if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID)) &&
-                (ch->getProperties() & BLECharacteristic::PROPERTY_NOTIFY)) {
-                if (ch->subscribe(true, new ReportCallbacks())) {
+            if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID))) {
+                if (ch->subscribe(true, onReportNotify)) {
                     subscribed = true;
                 }
             }
@@ -231,7 +248,7 @@ void GamepadController::connectToPad() {
 
     if (!subscribed) {
         Serial.println("[GAMEPAD] Report not found");
-        cleanupClient();
+        client->disconnect();
         phase = Phase::RETRY_WAIT;
         phaseEnteredAt = millis();
         return;
@@ -244,11 +261,9 @@ void GamepadController::connectToPad() {
     phaseEnteredAt = millis();
 }
 
-void GamepadController::cleanupClient() {
-    if (client != nullptr) {
+void GamepadController::disconnectClient() {
+    if (client != nullptr && client->isConnected()) {
         client->disconnect();
-        BLEDevice::deleteClient(client);
-        client = nullptr;
     }
 }
 

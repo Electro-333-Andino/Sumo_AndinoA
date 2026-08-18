@@ -174,6 +174,8 @@ Con `GAMEPAD_DEBUG = 1` el monitor serie (115200 baudios) muestra el estado del 
 
 ## Cómo compilar y cargar el firmware
 
+### Con Arduino IDE
+
 1.  **Instala el Arduino IDE** desde [arduino.cc](https://www.arduino.cc/en/software).
 2.  **Añade el soporte para ESP32:**
     *   En *Archivo → Preferencias*, en "Gestor de URLs Adicionales de Tarjetas", añade:
@@ -185,6 +187,34 @@ Con `GAMEPAD_DEBUG = 1` el monitor serie (115200 baudios) muestra el estado del 
     *   Conecta el ESP32-C3 por USB y selecciona el puerto en *Herramientas → Puerto*.
     *   Abre `Sumo_AndinoA.ino` y pulsa **Subir**.
     *   Abre el Monitor Serie a **115200 baudios** para ver la actividad del robot.
+
+### Con arduino-cli (build reproducible)
+
+Para fijar la versión exacta del core ESP32 (evita que un cambio futuro de la
+librería BLE rompa el build sin aviso):
+
+```bash
+arduino-cli core update-index
+arduino-cli core install esp32:esp32@3.3.10   # versión con la que se validó este proyecto
+arduino-cli compile --fqbn esp32:esp32:esp32c3 Sumo_AndinoA
+arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32c3 Sumo_AndinoA
+```
+
+O con el `Makefile` del repositorio: `make compile`, `make upload` (ajusta
+`CONFIG_FILE` si tu `arduino-cli.yaml` está en otra ruta).
+
+### Pruebas nativas (sin hardware)
+
+`GamepadParser` y `GamepadMixer` son funciones puras y se prueban en el host
+antes de tocar el robot:
+
+```bash
+make test
+```
+
+Ejecuta los 10 casos del contrato (sticks centrados, avance/retroceso 100 %,
+giros sobre el sitio, avance + giro, deadzone, clamping y rechazo de reports
+inválidos) y debe terminar con `ALL TESTS PASSED`.
 
 ---
 
