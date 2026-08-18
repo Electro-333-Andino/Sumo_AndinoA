@@ -20,39 +20,31 @@
 #include "SafetyManager.h"
 #include "GamepadController.h"
 #include "GamepadMixer.h"
-#include <string.h>
 
-#define PIN_LED 8
-
-#define PIN_ENA 0
-#define PIN_IN1 1
-#define PIN_IN2 3
-
-#define PIN_ENB 4
-#define PIN_IN3 5
-#define PIN_IN4 6
-
+// --- CONFIGURACIÓN DE PINES ---
+#define PIN_LED  8
+#define PIN_ENA  0
+#define PIN_IN1  1
+#define PIN_IN2  3
+#define PIN_ENB  4
+#define PIN_IN3  5
+#define PIN_IN4  6
 #define PIN_STBY 7
 
-// Aumentamos el tiempo de espera para mayor tolerancia con apps de control manual
+// Watchdog del teléfono: si deja de enviar comandos durante este tiempo, parada preventiva
 #define COMMAND_TIMEOUT_MS 1500
 
-// --- CALIBRACIÓN DE VELOCIDAD BASE POR DEFECTO (0 a 1023) ---
+// --- VELOCIDADES POR DEFECTO (0 a 1023) ---
 uint16_t VELOCIDAD_IZQUIERDA = 1023;
 uint16_t VELOCIDAD_DERECHA   = 1023;
 uint16_t VELOCIDAD_GIRO      = 1023;
 
-// Velocidad máxima que usa el mando. La configura el teléfono con sus
-// comandos de movimiento (p. ej. "F,700,700" -> 700). Hasta que Android
-// envíe el primero, se usa el máximo por defecto (1023).
-uint16_t configuredSpeed = 1023;
-
-// DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZED/OUTPUT por Serial para
-// verificar el parser y la mezcla; 0 = silencio (ahorra CPU).
+// DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZED/OUTPUT por Serial; 0 = silencio
 #ifndef GAMEPAD_DEBUG
 #define GAMEPAD_DEBUG 1
 #endif
 
+// --- INSTANCIACIÓN ---
 StatusLed ledEstado(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
 BleManager bluetooth("SumoAndinoA");
@@ -60,135 +52,153 @@ SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 GamepadController gamepad;
 GamepadMixer mixer;
 
-// Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea),
-// por eso solo toca pines directamente, nada de heap ni Strings aquí.
+// Velocidad máxima que usa el mando. La configura el teléfono con sus comandos
+// de movimiento (p. ej. "F,700,700" -> 700). Por defecto: 1023.
+uint16_t configuredSpeed = 1023;
+
+// --- CALLBACKS DE SEGURIDAD ---
+// Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea):
+// solo toca pines, nada de heap ni Strings.
 void safetyStop() {
-  // Si el mando está conectado, él es la fuente de control activa: la
-  // desconexión del teléfono no debe frenar al robot.
+  // Si el mando está conectado, él es la fuente activa: no frenar por el teléfono
   if (!gamepad.isConnected()) {
     robot.emergencyStop(); // corte duro: STBY a LOW, el TB6612 queda en alta impedancia
   }
 }
 
-// El mando invoca este callback (desde loop o desde la tarea BLE) ante:
-//  - desconexión del mando
-//  - timeout sin reports (GAMEPAD_TIMEOUT_MS)
-//  - antes de un intento de conexión (bloquea loop() unos segundos)
+// El mando invoca este callback ante desconexión, timeout sin reports o antes
+// de un intento de conexión (bloquea loop() unos segundos).
 void gamepadStop() {
   robot.emergencyStop();
 }
+
+// --- SUB-RUTINAS DE CONTROL ---
+
+// Comando del teléfono: SIEMPRE se interpreta (para actualizar configuredSpeed),
+// pero solo mueve el robot si el mando no está activo (prioridad del mando).
+void processPhoneCommand(char* paquete, bool padActive) {
+  char comando = 'S';
+  int vIzqInput = VELOCIDAD_IZQUIERDA;
+  int vDerInput = VELOCIDAD_DERECHA;
+
+  int camposLeidos = sscanf(paquete, "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
+
+  uint16_t speedL = constrain(vIzqInput, 0, 1023);
+  uint16_t speedR = constrain(vDerInput, 0, 1023);
+
+  // La velocidad configurada por Android se comparte con el mando; se actualiza
+  // siempre (incluso con el mando activo) para que el nuevo límite aplique ya.
+  if ((comando == 'F' || comando == 'B' || comando == 'L' || comando == 'R') &&
+      camposLeidos == 3) {
+    uint16_t maxSpeed = max(speedL, speedR);
+    if (maxSpeed > 0) configuredSpeed = maxSpeed;
+  }
+
+  // Mando conectado = fuente de control activa: no mover motores con el teléfono
+  if (padActive) {
+    return;
+  }
+
+  switch (comando) {
+    case 'F':
+      robot.moveForward(speedL, speedR);
+      break;
+
+    case 'B':
+      robot.moveBackward(speedL, speedR);
+      break;
+
+    case 'L':
+      if (camposLeidos == 3) {
+        robot.turnLeft(speedL, speedR);
+      } else {
+        robot.turnLeft(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+      }
+      break;
+
+    case 'R':
+      if (camposLeidos == 3) {
+        robot.turnRight(speedL, speedR);
+      } else {
+        robot.turnRight(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
+      }
+      break;
+
+    case 'S':
+    default:
+      robot.stop();
+      break;
+  }
+
+  Serial.print("Cmd: "); Serial.print(comando);
+  Serial.print(" | Motor Izq: "); Serial.print(speedL);
+  Serial.print(" | Motor Der: "); Serial.println(speedR);
+}
+
+// Control con el mando: re-aplica el estado a 50 Hz. Si no llegan reports,
+// GamepadController ya detiene el robot por timeout (200 ms).
+void processGamepadControl() {
+  static unsigned long lastMotorUpdate = 0;
+  static unsigned long lastPadLog = 0;
+  unsigned long now = millis();
+
+  if (now - lastMotorUpdate < 20) {
+    return;
+  }
+  lastMotorUpdate = now;
+
+  GamepadState st = gamepad.getState();
+  MotorOutput out = mixer.calculate(st, configuredSpeed);
+  robot.setMotorSpeeds(out.left, out.right);
+
+#if GAMEPAD_DEBUG
+  // ~20 líneas/s para no saturar Serial
+  if (now - lastPadLog >= 50) {
+    lastPadLog = now;
+    Serial.printf("[PAD] RAW LY=%d RX=%d | NLY=%d NRX=%d | L=%d R=%d\n",
+                  st.rawLeftY, st.rawRightX, st.leftY, st.rightX,
+                  out.left, out.right);
+  }
+#endif
+}
+
+// --- SETUP / LOOP ---
 
 void setup() {
   Serial.begin(115200);
 
   ledEstado.begin();
   robot.begin();
+
   bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
+
   gamepad.setStopCallback(gamepadStop);
   gamepad.begin(); // DESPUÉS de bluetooth.begin(): BLEDevice ya está iniciado
+
+  Serial.println("Sistema listo - Modo: Control dual");
 }
 
 void loop() {
-  ledEstado.setConnected(bluetooth.isConnected() || gamepad.isConnected());
-  ledEstado.update();
-
-  // El mando conectado tiene prioridad: desactiva el watchdog del teléfono
-  safety.setGamepadActive(gamepad.isConnected());
-  safety.check();
-
-  // Escaneo/conexión/reports del mando (puede bloquear durante la conexión)
+  // 1. Estado fresco del mando (escaneo/conexión/reports)
   gamepad.update();
 
-  // --- Control con el mando (solo cuando está conectado) ---
-  if (gamepad.isConnected()) {
-    static unsigned long lastMotorUpdate = 0;
-    static unsigned long lastPadLog = 0;
-    unsigned long now = millis();
+  // 2. Fuente de control activa y LED
+  bool isPadActive = gamepad.isConnected();
+  ledEstado.setConnected(bluetooth.isConnected() || isPadActive);
+  ledEstado.update();
 
-    // Re-aplica el estado del mando a 50 Hz; si no hay reports nuevos,
-    // GamepadController ya habrá detenido el robot por timeout.
-    if (now - lastMotorUpdate >= 20) {
-      lastMotorUpdate = now;
+  safety.setGamepadActive(isPadActive);
+  safety.check();
 
-      GamepadState st = gamepad.getState();
-      MotorOutput out = mixer.calculate(st, configuredSpeed);
-      robot.setMotorSpeeds(out.left, out.right);
-
-#if GAMEPAD_DEBUG
-      // ~20 líneas/s para no saturar Serial ni robar tiempo al loop
-      if (now - lastPadLog >= 50) {
-        lastPadLog = now;
-        Serial.printf("[PAD] RAW LY=%d RX=%d | NLY=%d NRX=%d | L=%d R=%d\n",
-                      st.rawLeftY, st.rawRightX, st.leftY, st.rightX,
-                      out.left, out.right);
-      }
-#endif
-    }
-  }
-
-  // --- Comandos desde Android (protocolo intacto) ---
+  // 3. Teléfono: siempre se lee; mueve solo si el mando no está activo
   char paquete[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(paquete, sizeof(paquete))) {
+    processPhoneCommand(paquete, isPadActive);
+  }
 
-    char comando = 'S';
-    int vIzqInput = VELOCIDAD_IZQUIERDA;
-    int vDerInput = VELOCIDAD_DERECHA;
-
-    int camposLeidos = sscanf(paquete, "%c,%d,%d", &comando, &vIzqInput, &vDerInput);
-
-    uint16_t speedL = constrain(vIzqInput, 0, 1023);
-    uint16_t speedR = constrain(vDerInput, 0, 1023);
-
-    // El mando reutiliza la velocidad que Android configura en cada comando:
-    // se actualiza SIEMPRE (aunque el mando esté al mando) para que el nuevo
-    // límite se aplique de inmediato.
-    if ((comando == 'F' || comando == 'B' || comando == 'L' || comando == 'R') &&
-        camposLeidos == 3) {
-      uint16_t maxSpeed = max(speedL, speedR);
-      if (maxSpeed > 0) configuredSpeed = maxSpeed;
-    }
-
-    // Mando conectado = fuente de control activa: se ignoran los comandos
-    // de movimiento del teléfono (la velocidad configurada sí se procesa,
-    // como se ve arriba).
-    if (gamepad.isConnected()) {
-      return;
-    }
-
-    switch (comando) {
-      case 'F':
-        robot.moveForward(speedL, speedR);
-        break;
-
-      case 'B':
-        robot.moveBackward(speedL, speedR);
-        break;
-
-      case 'L':
-        if (camposLeidos == 3) {
-          robot.turnLeft(speedL, speedR);
-        } else {
-          robot.turnLeft(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
-        }
-        break;
-
-      case 'R':
-        if (camposLeidos == 3) {
-          robot.turnRight(speedL, speedR);
-        } else {
-          robot.turnRight(VELOCIDAD_GIRO, VELOCIDAD_GIRO);
-        }
-        break;
-
-      case 'S':
-      default:
-        robot.stop();
-        break;
-    }
-
-    Serial.print("Cmd: "); Serial.print(comando);
-    Serial.print(" | Motor Izq: "); Serial.print(speedL);
-    Serial.print(" | Motor Der: "); Serial.println(speedR);
+  // 4. Mando: prioridad sobre el teléfono
+  if (isPadActive) {
+    processGamepadControl();
   }
 }
