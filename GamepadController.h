@@ -36,7 +36,7 @@
 // Filtro de nombre del mando (subcadena). Vacío = aceptar cualquier
 // dispositivo que anuncie el servicio HID. Ajustar al mando real.
 #ifndef GAMEPAD_NAME_FILTER
-#define GAMEPAD_NAME_FILTER "Xbox"
+#define GAMEPAD_NAME_FILTER ""
 #endif
 
 // Servicio HID estándar y su characteristic de Report
@@ -67,8 +67,9 @@ class GamepadController {
 public:
     GamepadController();
 
-    // IMPORTANTE: llamar DESPUÉS de bluetooth.begin() (que ya ejecuta
-    // BLEDevice::init). Esta clase no llama a BLEDevice::init().
+    // Inicializa el cliente BLE de forma autónoma: llama a BLEDevice::init()
+    // (idempotente) y no requiere que el servidor de la app se haya iniciado.
+    // Adecuado para la arquitectura de modos mutuamente excluyentes.
     void begin();
 
     // Máquina de estados: escaneo -> conexión -> suscripción -> reports.

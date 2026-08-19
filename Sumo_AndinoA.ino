@@ -20,64 +20,100 @@
 #include "SafetyManager.h"
 #include "GamepadController.h"
 #include "GamepadMixer.h"
+#include <Preferences.h>
+#include <Esp.h>
 
-// --- PIN CONFIGURATION ---
+#include <cstdio>
+#include <nvs_flash.h>
+
+// --- MODOS DE OPERACIÓN (persistidos en NVS) ---
+#define MODE_APP  0 // teléfono Android (servidor BLE)
+#define MODE_XBOX 1 // mando Xbox (cliente BLE HID)
+
+// Namespace y clave usados por Preferences para persistir el modo
+#define NVS_NAMESPACE "Andino_Sumo"
+#define NVS_KEY_MODE  "opMode"
+
+// Fail-safe de hardware: botón interno BOOT del ESP32-C3 (activo en LOW).
+// Es el ÚNICO mecanismo para cambiar de modo.
+#define PIN_BOOT         9
+#define BOOT_HOLD_MS     3000 // mantener 3 s para invertir el modo
+#define BOOT_DEBOUNCE_MS 30   // anti-rebote mínimo
+
+// --- CONFIGURACIÓN DE PINES ---
 #define PIN_LED  8
-#define PIN_ENA  0
-#define PIN_IN1  1
-#define PIN_IN2  3
-#define PIN_ENB  4
-#define PIN_IN3  5
-#define PIN_IN4  6
+
+#define PIN_ENA  5
+#define PIN_IN1  6
+#define PIN_IN2  20
+
+#define PIN_ENB  0
+#define PIN_IN3  1
+#define PIN_IN4  4
+
 #define PIN_STBY 7
 
-// Phone watchdog: if no command arrives within this time, preventive stop
+// Watchdog del teléfono: si no llega un comando en este tiempo, parada preventiva
 #define COMMAND_TIMEOUT_MS 1500
 
-// --- DEFAULT SPEEDS (0 to 1023) ---
-uint16_t DEFAULT_SPEED_LEFT   = 1023;
-uint16_t DEFAULT_SPEED_RIGHT  = 1023;
-uint16_t DEFAULT_TURN_SPEED   = 1023;
+// --- VELOCIDADES POR DEFECTO (0 a 1023) ---
+uint16_t DEFAULT_SPEED_LEFT  = 1023;
+uint16_t DEFAULT_SPEED_RIGHT = 1023;
+uint16_t DEFAULT_TURN_SPEED  = 1023;
 
-// GAMEPAD DEBUG: 1 = print RAW/NORMALIZED/OUTPUT over Serial; 0 = silent
+// DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZADO/SALIDA por Serial; 0 = silencio
 #ifndef GAMEPAD_DEBUG
 #define GAMEPAD_DEBUG 1
 #endif
 
-// --- INSTANTIATION ---
+// --- INSTANCIACIÓN ---
 StatusLed statusLed(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
-BleManager bluetooth("SumoAndinoA");
+BleManager bluetooth("Andino_Sumo");
 SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 GamepadController gamepad;
 GamepadMixer mixer;
 
-// Maximum speed used by the gamepad. It is set by the phone with its movement
-// commands (e.g. "F,700,700" -> 700). Default: 1023.
+// Velocidad máxima que usa el mando. La configura el teléfono con sus comandos
+// de movimiento (p. ej. "F,700,700" -> 700). Por defecto: 1023.
 uint16_t configuredSpeed = 1023;
 
-// --- SAFETY CALLBACKS ---
-// Runs from the BLE disconnect callback (possibly another task):
-// only touches pins, no heap or Strings here.
-void safetyStop() {
-  // If the gamepad is connected it is the active source: do not stop on phone
-  // disconnect.
-  if (!gamepad.isConnected()) {
-    robot.emergencyStop(); // hard cut: STBY LOW, the TB6612 goes high impedance
-  }
+// Modo activo, persistido en NVS (namespace "sumo", clave "opMode")
+uint8_t opMode = MODE_APP;
+
+// --- CAMBIO DE MODO ---
+
+// Persiste el modo nuevo en NVS y reinicia para arrancar en él.
+void setModeAndRestart(uint8_t newMode) {
+  Preferences prefs;
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putUChar(NVS_KEY_MODE, newMode);
+  prefs.end();
+
+  Serial.print("[MODO] Cambiando a modo ");
+  Serial.println(newMode);
+  ESP.restart();
 }
 
-// The gamepad invokes this callback on disconnect, report timeout or before a
-// connection attempt (which blocks loop() for a few seconds).
+// --- CALLBACKS DE SEGURIDAD ---
+
+// Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea):
+// solo toca pines, nada de heap ni Strings.
+void safetyStop() {
+  robot.emergencyStop(); // corte duro: STBY a LOW, el TB6612 queda en alta impedancia
+}
+
+// El mando invoca este callback ante desconexión, timeout de reports o antes
+// de un intento de conexión (que bloquea loop() unos segundos).
 void gamepadStop() {
   robot.emergencyStop();
 }
 
-// --- CONTROL ROUTINES ---
+// --- RUTINAS DE CONTROL (Modo App) ---
 
-// Phone command: ALWAYS parsed (to update configuredSpeed), but only moves the
-// robot when the gamepad is not active (gamepad priority).
-void processPhoneCommand(char* packet, bool padActive) {
+// Comando del teléfono: interpreta los comandos de movimiento del protocolo
+// Android (F, B, L, R, S).
+void processPhoneCommand(char* packet) {
   char command = 'S';
   int vLeftInput = DEFAULT_SPEED_LEFT;
   int vRightInput = DEFAULT_SPEED_RIGHT;
@@ -87,17 +123,11 @@ void processPhoneCommand(char* packet, bool padActive) {
   uint16_t speedL = constrain(vLeftInput, 0, 1023);
   uint16_t speedR = constrain(vRightInput, 0, 1023);
 
-  // The speed configured by Android is shared with the gamepad; it is updated
-  // ALWAYS (even with the gamepad active) so the new limit applies at once.
+  // La velocidad configurada por Android se guarda para el modo Xbox
   if ((command == 'F' || command == 'B' || command == 'L' || command == 'R') &&
       fieldsRead == 3) {
     uint16_t maxSpeed = max(speedL, speedR);
     if (maxSpeed > 0) configuredSpeed = maxSpeed;
-  }
-
-  // Gamepad connected = active control source: do not move motors from phone
-  if (padActive) {
-    return;
   }
 
   switch (command) {
@@ -132,12 +162,14 @@ void processPhoneCommand(char* packet, bool padActive) {
   }
 
   Serial.print("Cmd: "); Serial.print(command);
-  Serial.print(" | Left: "); Serial.print(speedL);
-  Serial.print(" | Right: "); Serial.println(speedR);
+  Serial.print(" | Izq: "); Serial.print(speedL);
+  Serial.print(" | Der: "); Serial.println(speedR);
 }
 
-// Gamepad control: re-applies the state at 50 Hz. If no reports arrive,
-// GamepadController already stops the robot by timeout (200 ms).
+// --- RUTINAS DE CONTROL (Modo Xbox) ---
+
+// Control con el mando: re-aplica el estado a 50 Hz. Si no llegan reports,
+// GamepadController ya detiene el robot por timeout (200 ms).
 void processGamepadControl() {
   static unsigned long lastMotorUpdate = 0;
   static unsigned long lastPadLog = 0;
@@ -153,7 +185,7 @@ void processGamepadControl() {
   robot.setMotorSpeeds(out.left, out.right);
 
 #if GAMEPAD_DEBUG
-  // ~20 lines/s to avoid saturating Serial
+  // ~20 líneas/s para no saturar Serial
   if (now - lastPadLog >= 50) {
     lastPadLog = now;
     Serial.printf("[PAD] RAW LY=%d RX=%d | NLY=%d NRX=%d | L=%d R=%d\n",
@@ -163,43 +195,143 @@ void processGamepadControl() {
 #endif
 }
 
-// --- SETUP / LOOP ---
+// --- FAIL-SAFE DE HARDWARE (botón BOOT) ---
 
-void setup() {
-  Serial.begin(115200);
+// Temporizador no bloqueante. Si BOOT se mantiene 3 s, invierte el modo en NVS
+// y reinicia. Es el único mecanismo de cambio de modo y funciona en ambos.
+void checkBootButton() {
+  static unsigned long pressStart = 0;
+  static bool pressed = false;
 
-  statusLed.begin();
-  robot.begin();
+  bool isPressed = (digitalRead(PIN_BOOT) == LOW);
+  unsigned long now = millis();
 
-  bluetooth.setSafetyStopCallback(safetyStop);
-  bluetooth.begin();
-
-  gamepad.setStopCallback(gamepadStop);
-  gamepad.begin(); // AFTER bluetooth.begin(): BLEDevice is already initialized
-
-  Serial.println("System ready - Dual control mode");
+  if (isPressed && !pressed) {
+    pressed = true;
+    pressStart = now;
+  } else if (!isPressed && pressed) {
+    pressed = false;
+  } else if (isPressed && pressed && (now - pressStart >= BOOT_HOLD_MS)) {
+    pressed = false; // evita reintentos mientras siga pulsado
+    uint8_t newMode = (opMode == MODE_APP) ? MODE_XBOX : MODE_APP;
+    setModeAndRestart(newMode);
+  }
 }
 
-void loop() {
-  // 1. Fresh gamepad state (scan/connect/reports)
-  gamepad.update();
+// --- FEEDBACK VISUAL ---
 
-  // 2. Active control source and LED
-  bool isPadActive = gamepad.isConnected();
-  statusLed.setConnected(bluetooth.isConnected() || isPadActive);
+// Al arrancar indica el modo activo:
+//   1 parpadeo lento (~1 s) = Modo App; 2 parpadeos rápidos = Modo Xbox.
+void blinkModeLed() {
+  pinMode(PIN_LED, OUTPUT);
+
+  if (opMode == MODE_APP) {
+    digitalWrite(PIN_LED, HIGH);
+    delay(1000);
+    digitalWrite(PIN_LED, LOW);
+  } else {
+    for (int i = 0; i < 2; i++) {
+      digitalWrite(PIN_LED, HIGH);
+      delay(200);
+      digitalWrite(PIN_LED, LOW);
+      delay(200);
+    }
+  }
+}
+
+// --- INICIALIZACIÓN EXCLUSIVA POR MODO ---
+
+void setupAppMode() {
+  bluetooth.setSafetyStopCallback(safetyStop);
+  bluetooth.begin();
+  Serial.println("Modo: APP (BLE Android)");
+}
+
+void setupXboxMode() {
+  gamepad.setStopCallback(gamepadStop);
+  gamepad.begin(); // inicializa el stack BLE de forma autónoma (idempotente)
+  Serial.println("Modo: XBOX (BLE HID)");
+}
+
+// --- BUCLES EXCLUSIVOS POR MODO ---
+
+void loopAppMode() {
+  statusLed.setConnected(bluetooth.isConnected());
   statusLed.update();
 
-  safety.setGamepadActive(isPadActive);
-  safety.check();
+  safety.check(); // watchdog del teléfono (1.5 s)
 
-  // 3. Phone: always read; moves only if the gamepad is not active
   char packet[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(packet, sizeof(packet))) {
-    processPhoneCommand(packet, isPadActive);
+    processPhoneCommand(packet);
   }
+}
 
-  // 4. Gamepad: priority over the phone
+void loopXboxMode() {
+  gamepad.update(); // escaneo/conexión/reports del mando
+
+  bool isPadActive = gamepad.isConnected();
+  statusLed.setConnected(isPadActive);
+  statusLed.update();
+
   if (isPadActive) {
     processGamepadControl();
   }
+}
+
+//Borrar la NVS
+void clearBleBonds() {
+        Serial.println("[BLE] Limpiando memoria NVS de emparejamientos...");
+        // Inicializa o borra la partición NVS completa
+        esp_err_t err = nvs_flash_erase();
+        if (err == ESP_OK) {
+            nvs_flash_init();
+            Serial.println("[BLE] Memoria NVS limpiada con éxito.");
+        } else {
+            Serial.printf("[BLE] Error al borrar NVS: %d\n", err);
+        }
+    }
+
+// --- SETUP / LOOP ---
+
+void setup() {
+    //clearBleBonds();
+
+
+    Serial.begin(115200);
+
+    // 1. Leer el modo persistido en NVS (namespace "sumo"); por defecto Modo App
+    {
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, true);
+        opMode = prefs.getUChar(NVS_KEY_MODE, MODE_APP);
+        prefs.end();
+    }
+
+    // 2. Feedback visual del modo de arranque
+    blinkModeLed();
+
+    // 3. Inicialización común a ambos modos
+    statusLed.begin();
+    robot.begin();
+
+    // 4. Inicialización EXCLUSIVA: solo el stack BLE del modo activo
+    if (opMode == MODE_APP) {
+        setupAppMode();
+    } else {
+        setupXboxMode();
+    }
+}
+
+void loop() {
+    // Fail-safe global: el botón BOOT está disponible en ambos modos
+    checkBootButton();
+
+    // Bloques estrictamente aislados por opMode: el bucle nunca toca el stack
+    // BLE del modo inactivo.
+    if (opMode == MODE_APP) {
+        loopAppMode();
+    } else {
+        loopXboxMode();
+    }
 }

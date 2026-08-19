@@ -33,7 +33,7 @@ int main() {
   GamepadMixer mixer;
   const int16_t MAX = 700; // configuredSpeed = 700
 
-  // 1) Both sticks centered -> 0,0
+  // 1) Ambos sticks centrados -> 0,0
   {
     uint8_t r[14]; makeReport(r, 128, 128);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -42,7 +42,7 @@ int main() {
     check("T1 center: right", o.right, 0);
   }
 
-  // 2) LY 100% up (0) -> both motors +MAX
+  // 2) LY 100% arriba (0) -> ambos motores +MAX
   {
     uint8_t r[14]; makeReport(r, 0, 128);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -52,8 +52,8 @@ int main() {
     check("T2 right", o.right, MAX);
   }
 
-  // 3) LY 100% down (255) -> both motors -MAX
-  //    (real stick asymmetry: 128 up / 127 down -> -991, acceptable)
+  // 3) LY 100% abajo (255) -> ambos motores -MAX
+  //    (asimetría real del stick: 128 arriba / 127 abajo -> -991, aceptable)
   {
     uint8_t r[14]; makeReport(r, 255, 128);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -63,7 +63,7 @@ int main() {
     check("T3 right", o.right, -693);
   }
 
-  // 4) RX 100% right (255) -> spin right on the spot: +MAX / -MAX
+  // 4) RX 100% a la derecha (255) -> giro a la derecha sobre el sitio: +MAX / -MAX
   {
     uint8_t r[14]; makeReport(r, 128, 255);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -73,7 +73,7 @@ int main() {
     check("T4 right", o.right, -MAX);
   }
 
-  // 5) RX 100% left (0) -> spin left on the spot: -MAX / +MAX
+  // 5) RX 100% a la izquierda (0) -> giro a la izquierda sobre el sitio: -MAX / +MAX
   {
     uint8_t r[14]; makeReport(r, 128, 0);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -83,7 +83,7 @@ int main() {
     check("T5 right", o.right, MAX);
   }
 
-  // 6) Forward + turn: left = forward+turn, right = forward-turn
+  // 6) Avance + giro: left = forward+turn, right = forward-turn
   //    LY -> NLY=495 (raw 59), RX -> NRX=200 (raw 163); 495*700/1000=346
   {
     uint8_t r[14]; makeReport(r, 59, 163);
@@ -95,14 +95,14 @@ int main() {
     check("T6 right", o.right, 206);
   }
 
-  // 7) Stick inside deadzone (LY raw 118 -> magnitude 10 < 12) -> 0
+  // 7) Stick dentro de la deadzone (LY raw 118 -> magnitud 10 < 12) -> 0
   {
     uint8_t r[14]; makeReport(r, 118, 128);
     GamepadState st; parser.parseReport(r, 14, st);
     check("T7 deadzone LY", st.leftY, 0);
   }
 
-  // 8) Clamp: full forward + full turn -> left clamped to +MAX
+  // 8) Límite: avance total + giro total -> left limitado a +MAX
   {
     uint8_t r[14]; makeReport(r, 0, 255);
     GamepadState st; parser.parseReport(r, 14, st);
@@ -111,7 +111,7 @@ int main() {
     check("T8 right clamp", o.right, 0);
   }
 
-  // 9) Context example: NLY=1000 NRX=366 -> L=700 R=444
+  // 9) Ejemplo del contexto: NLY=1000 NRX=366 -> L=700 R=444
   {
     GamepadState st; memset(&st, 0, sizeof(st));
     st.leftY = 1000; st.rightX = 366;
@@ -120,7 +120,7 @@ int main() {
     check("T9 right (context example)", o.right, 444);
   }
 
-  // 10) Invalid report (different report ID) -> parse fails
+  // 10) Report inválido (otro report ID) -> el parse falla
   {
     uint8_t r[14]; makeReport(r, 128, 128); r[0] = 0x11;
     GamepadState st; memset(&st, 0, sizeof(st));

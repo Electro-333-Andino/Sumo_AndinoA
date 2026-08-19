@@ -15,6 +15,7 @@
  */
 
 #include "GamepadController.h"
+#include <BLESecurity.h>
 #include <string.h>
 #include <map>
 
@@ -26,13 +27,6 @@ static constexpr uint8_t GAMEPAD_SCAN_TIME_S = 2;
 // Pausa entre intentos fallidos de escaneo/conexión
 static constexpr uint32_t GAMEPAD_RETRY_DELAY_MS = 3000;
 
-// ---------------------------------------------------------------------------
-// Callbacks BLE.
-//
-// IMPORTANTE: se instancian UNA SOLA VEZ como objetos estáticos (y los de
-// report como función libre) y se reutilizan en cada reconexión. No usar
-// `new` aquí: cada reconexión del mando en una jornada de competencia
-// acumularía heap hasta agotarlo.
 // ---------------------------------------------------------------------------
 
 // Se ejecutan en la tarea del stack BLE; solo marcan flags (thread-safe).
@@ -95,9 +89,22 @@ GamepadController::GamepadController()
 }
 
 void GamepadController::begin() {
-    // BLEDevice::init() ya lo ejecutó BleManager::begin(). El ESP32-C3 no
-    // puede tener Bluedroid y NimBLE activos a la vez, así que el cliente
-    // del mando usa la misma API BLEDevice que el servidor del teléfono.
+    // Inicializa el stack BLE si aún no está activo. BLEDevice::init() es
+    // idempotente (usa un flag interno), así que es seguro llamarlo aunque el
+    // servidor de la app ya lo haya inicializado: esto hace que el Modo Xbox
+    // sea autónomo. Sin esta llamada, el stack quedaría sin inicializar y
+    // BLEDevice::getScan()/createClient() provocarían un Load access fault.
+    BLEDevice::init("SumoAndinoA");
+
+    // --- CONFIGURACIÓN DE SEGURIDAD OBLIGATORIA PARA XBOX (HID over GATT) ---
+    // El perfil HID exige conexión encriptada y vinculada (bonding): sin esto,
+    // el mando rechaza la suscripción al Report con "autenticación insuficiente"
+    // o corta la conexión. Secure Connections + Bonding, sin MITM (Just Works).
+    BLESecurity* pSecurity = new BLESecurity();
+    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND); // SC + bonding
+    pSecurity->setCapability(ESP_IO_CAP_NONE);                 // sin pantalla ni teclado
+    pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+
     Serial.println("[GAMEPAD] Scanning...");
     phase = Phase::SCANNING;
     phaseEnteredAt = millis();
@@ -231,16 +238,19 @@ void GamepadController::connectToPad() {
     Serial.println("[GAMEPAD] HID service found");
 
     // Suscribirse a notifications de la(s) characteristic(s) de Report.
-    // subscribe() falla si la characteristic no tiene CCCD, así que no hace
-    // falta filtrar por propiedades (getProperties() no existe en core 3.x).
+    // El servicio HID puede exponer varios 0x2A4D (input/output/feature): solo
+    // el Report de entrada (input) soporta Notify. Suscribirse a un Report de
+    // salida (vibración) o de feature puede provocar que el mando cierre la
+    // conexión, por eso se filtra con canNotify() antes de suscribirse.
     bool subscribed = false;
     std::map<std::string, BLERemoteCharacteristic*>* chars = hidService->getCharacteristics();
     if (chars != nullptr) {
         for (auto& pair : *chars) {
             BLERemoteCharacteristic* ch = pair.second;
-            if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID))) {
+            if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID)) && ch->canNotify()) {
                 if (ch->subscribe(true, onReportNotify)) {
                     subscribed = true;
+                    Serial.println("[GAMEPAD] Subscribed to Input Report");
                 }
             }
         }

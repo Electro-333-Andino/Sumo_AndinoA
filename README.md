@@ -15,18 +15,21 @@ El código está organizado en módulos pequeños y documentados, pensado para q
 
 ## Características
 
-*   **Control inalámbrico dual BLE**
-    *   Teléfono Android mediante el protocolo de texto del firmware.
-    *   Mando Bluetooth (HID) con joysticks y control proporcional de velocidad.
+*   **Control inalámbrico dual BLE (modos mutuamente excluyentes)**
+    *   **Modo App:** teléfono Android mediante el protocolo de texto del firmware.
+    *   **Modo Xbox:** mando Bluetooth (HID) con joysticks y control proporcional de velocidad.
+    *   Solo se inicializa el stack BLE del modo activo (ahorra RAM y evita conflictos).
 *   **Control proporcional con mezcla diferencial**
     *   El stick izquierdo (eje Y) controla avance/retroceso.
     *   El stick derecho (eje X) controla los giros.
     *   La velocidad aumenta progresivamente según cuánto se desplace el joystick (respuesta lineal con deadzone configurable).
 *   **Velocidad máxima única (`configuredSpeed`)**
     *   La configura el teléfono y el mando la reutiliza automáticamente; no existe una segunda configuración independiente.
-*   **Prioridad automática de fuente de control**
-    *   Con el mando conectado, el mando tiene prioridad.
-    *   Al desconectarse el mando, el teléfono recupera el control.
+*   **Selección de modo con el botón BOOT (fail-safe físico)**
+    *   El único mecanismo para cambiar de modo es el botón interno **BOOT** (GPIO 9):
+        mantenerlo presionado 3 segundos invierte el modo y reinicia.
+    *   El modo activo se guarda en NVS (Preferences, namespace `sumo`) y el LED
+        indica el modo al arrancar (1 parpadeo lento = App, 2 rápidos = Xbox).
 *   **Seguridad integrada (anti-escape)**
     *   Parada inmediata de los motores ante cualquier desconexión.
     *   Watchdog del teléfono: 1,5 s sin comandos → parada preventiva.
@@ -154,6 +157,35 @@ Con `GAMEPAD_DEBUG = 1` el monitor serie (115200 baudios) muestra el estado del 
 ```
 [PAD] RAW LY=0 RX=255 | NLY=1000 NRX=1000 | L=700 R=-700
 ```
+
+---
+
+## Modos de operación
+
+El robot arranca en uno de dos modos **mutuamente excluyentes**, persistidos en
+NVS (`Preferences`, namespace `sumo`, clave `opMode`). Solo se inicializa el
+stack BLE del modo activo, lo que reduce el consumo de RAM y evita conflictos.
+
+| Modo | `opMode` | Fuente de control | Cómo se activa |
+| :--- | :---: | :--- | :--- |
+| **App** | `0` (por defecto) | Teléfono Android (BLE GATT) | BOOT 3 s estando en Modo Xbox |
+| **Xbox** | `1` | Mando Bluetooth (BLE HID) | BOOT 3 s estando en Modo App |
+
+El cambio de modo se realiza **exclusivamente** con el botón interno **BOOT**
+(GPIO 9) mantenido 3 segundos: invierte `opMode` en NVS y reinicia. No se
+utilizan comandos de la app ni botones del mando para cambiar de modo.
+
+> **Nota sobre Bluepad32:** esta librería requiere Bluetooth *Classic*
+> (disponible solo en ESP32 clásico). El ESP32-C3 únicamente dispone de BLE,
+> por lo que el Modo Xbox usa el controlador BLE HID ligero del proyecto
+> (`GamepadController`), con la misma funcionalidad y sin fugas de heap.
+
+### Seguridad de la conexión (pairing)
+
+El perfil HID over GATT exige conexión encriptada y vinculada (bonding). El
+firmware configura el pairing automático **Secure Connections + Bonding** con
+capacidad `NoInputNoOutput` (Just Works, sin confirmación manual): el mando y
+el ESP32 se vinculan solos al conectar, sin interacción del usuario.
 
 ---
 
