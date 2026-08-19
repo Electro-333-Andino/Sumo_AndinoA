@@ -188,8 +188,9 @@ void processGamepadControl() {
   // ~20 líneas/s para no saturar Serial
   if (now - lastPadLog >= 50) {
     lastPadLog = now;
-    Serial.printf("[PAD] RAW LY=%d RX=%d | NLY=%d NRX=%d | L=%d R=%d\n",
-                  st.rawLeftY, st.rawRightX, st.leftY, st.rightX,
+    Serial.printf("[PAD] RAW LY=%u RX=%u | NLY=%d NRX=%d | L=%d R=%d\n",
+                  (unsigned)st.rawLeftY, (unsigned)st.rawRightX,
+                  st.leftY, st.rightX,
                   out.left, out.right);
   }
 #endif

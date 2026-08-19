@@ -103,7 +103,34 @@ Formato general: `DIRECCIÓN,VEL_IZQ,VEL_DER` (velocidades de `0` a `1023`):
 
 ## Control con mando Bluetooth
 
-El firmware actúa como **cliente BLE (central)**: escanea, detecta el mando, se conecta, se suscribe a los *reports* HID y los procesa en tiempo real.
+**Mando soportado:** Xbox Wireless Controller Model 1708 (Xbox One S)
+
+| Parámetro | Valor |
+| :--- | :--- |
+| Protocolo | Bluetooth Low Energy (BLE) |
+| ESP32 | ESP32-C3 |
+| HID Service | `0x1812` |
+| HID Report | `0x2A4D` |
+| Ejes | uint16 LE, 0..65535 (centro 32768) |
+
+El firmware actúa como **cliente BLE (central)**: escanea, detecta el mando, se
+conecta, realiza el pairing (Secure Connections + Bonding, Just Works) y se
+suscribe a las notificaciones del HID Report. El layout exacto del reporte
+(offsets de ejes, triggers, D-Pad y botones) está documentado en
+`GamepadParser.cpp` y soporta las variantes reales del 1708 (15 y 16 bytes,
+con y sin Report ID).
+
+### Procedimiento de conexión
+
+```text
+1. Encender el robot (Modo Xbox).
+2. Encender el mando con el botón Xbox.
+3. Mantener pulsado el botón Pair del mando hasta que el LED parpadee.
+4. El ESP32 escanea y encuentra "Xbox Wireless Controller".
+5. Se realiza la conexión BLE y el pairing (automático, sin PIN).
+6. Se suscriben las notificaciones HID.
+7. Los controles quedan activos (Serial: "[GAMEPAD] Notification enabled").
+```
 
 ### Mapa de control
 
@@ -139,23 +166,38 @@ Los resultados se limitan al rango `±configuredSpeed`. Esto permite avance con 
 
 ### Seguridad
 
-*   Si el mando se desconecta, los motores se detienen de inmediato.
-*   Si no llega ningún *report* HID durante **200 ms** (`GAMEPAD_TIMEOUT_MS`), los motores se detienen por prevención.
+*   Si el mando se desconecta o deja de transmitir, el estado pasa a
+    **desconectado**: los motores se detienen de inmediato y el robot
+    permanece detenido (no se reutiliza el último comando) hasta que llega un
+    nuevo reporte HID válido.
+*   Timeout sin reporte **válido**: **200 ms** (`GAMEPAD_TIMEOUT_MS`) → STOP +
+    desconexión + reconexión automática.
+*   Un reporte inválido **no** alimenta el watchdog ni mueve el robot.
 
 ### Configuración del mando objetivo
 
 | Parámetro | Ubicación | Valor por defecto |
 | :--- | :--- | :--- |
 | Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox"` (vacío = cualquier dispositivo HID) |
-| Formato del HID report | `GamepadParser.cpp` (offsets, centro, rango y polaridad de los ejes) | Xbox Wireless Controller, Report ID `0x01` |
+| Formato del HID report | `GamepadParser.cpp` (offsets, centro, rango y polaridad) | Xbox 1708, ejes u16 LE, 15/16 bytes |
 | Deadzone | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
 | Timeout de seguridad | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
 | Debug por Serial | `Sumo_AndinoA.ino` → `GAMEPAD_DEBUG` | 1 (activo) |
+| Dump de reports HID | `GamepadController.h` → `DEBUG_GAMEPAD_REPORTS` | 0 (desactivado) |
 
 Con `GAMEPAD_DEBUG = 1` el monitor serie (115200 baudios) muestra el estado del mando para verificar el parser y la mezcla:
 
 ```
-[PAD] RAW LY=0 RX=255 | NLY=1000 NRX=1000 | L=700 R=-700
+[PAD] RAW LY=0 RX=65535 | NLY=1000 NRX=1000 | L=700 R=-700
+```
+
+Con `DEBUG_GAMEPAD_REPORTS = 1` se vuelca además la longitud, los bytes en hex y los sticks decodificados (throttled a ~100 ms), útil para verificar el mando físico:
+
+```
+[GAMEPAD] len=16
+[GAMEPAD] data: 00 80 00 80 00 80 00 80 ...
+[GAMEPAD] LX=32768 LY=32768 RX=32768 RY=32768
+[GAMEPAD] normalized LX=0 LY=0 RX=0 RY=0
 ```
 
 ---

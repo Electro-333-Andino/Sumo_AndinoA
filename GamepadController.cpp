@@ -162,8 +162,34 @@ void GamepadController::update() {
         reportReady = false;
         portEXIT_CRITICAL(&mux);
 
+#if DEBUG_GAMEPAD_REPORTS
+        // Volcado controlado (throttled) para verificar el mando real
+        static unsigned long lastReportLog = 0;
+        if (millis() - lastReportLog >= 100) {
+            lastReportLog = millis();
+            Serial.printf("[GAMEPAD] len=%u\n", (unsigned)len);
+            Serial.print("[GAMEPAD] data:");
+            for (uint8_t i = 0; i < len; i++) {
+                Serial.printf(" %02X", buf[i]);
+            }
+            Serial.println();
+        }
+#endif
+
         if (parser.parseReport(buf, len, state)) {
+            // El watchdog solo se alimenta con reportes VÁLIDOS: un reporte
+            // inválido no mantiene vivo al robot.
+            lastReportMillis = millis();
             state.connected = true; // estado nuevo listo para getState()
+
+#if DEBUG_GAMEPAD_REPORTS
+            Serial.printf("[GAMEPAD] LX=%u LY=%u RX=%u RY=%u\n",
+                          state.rawLeftX, state.rawLeftY,
+                          state.rawRightX, state.rawRightY);
+            Serial.printf("[GAMEPAD] normalized LX=%d LY=%d RX=%d RY=%d\n",
+                          state.leftX, state.leftY,
+                          state.rightX, state.rightY);
+#endif
         }
     }
 
@@ -178,9 +204,18 @@ void GamepadController::update() {
             break;
 
         case Phase::CONNECTED:
-            // Failsafe: si el mando deja de reportar, detener el robot
+            // Failsafe crítico: sin reporte VÁLIDO en GAMEPAD_TIMEOUT_MS el
+            // estado pasa a desconectado de verdad: se detienen los motores,
+            // se corta el enlace y se entra en reconexión. Así el último
+            // estado jamás vuelve a mover el robot.
             if (millis() - lastReportMillis > GAMEPAD_TIMEOUT_MS) {
+                connected = false;
+                state.connected = false;
+                disconnectClient();
                 if (stopCb != nullptr) stopCb();
+                phase = Phase::RETRY_WAIT;
+                phaseEnteredAt = millis();
+                Serial.println("[GAMEPAD] Report timeout - disconnected");
             }
             break;
 
@@ -248,9 +283,10 @@ void GamepadController::connectToPad() {
         for (auto& pair : *chars) {
             BLERemoteCharacteristic* ch = pair.second;
             if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID)) && ch->canNotify()) {
+                Serial.println("[GAMEPAD] Report characteristic found");
                 if (ch->subscribe(true, onReportNotify)) {
                     subscribed = true;
-                    Serial.println("[GAMEPAD] Subscribed to Input Report");
+                    Serial.println("[GAMEPAD] Notification enabled");
                 }
             }
         }
@@ -315,10 +351,11 @@ void GamepadController::clientDisconnected() {
 void GamepadController::storeReport(const uint8_t* data, size_t len) {
     if (len > GAMEPAD_MAX_REPORT_LEN) len = GAMEPAD_MAX_REPORT_LEN;
 
+    // Solo se copia el reporte: el timestamp del watchdog lo actualiza
+    // update() DESPUÉS de que parseReport() valide los datos.
     portENTER_CRITICAL(&mux);
     memcpy(reportBuffer, data, len);
     reportLen = (uint8_t)len;
     reportReady = true;
-    lastReportMillis = millis();
     portEXIT_CRITICAL(&mux);
 }

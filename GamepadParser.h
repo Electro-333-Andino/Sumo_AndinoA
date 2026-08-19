@@ -34,14 +34,17 @@
 //            negativo = stick hacia la izquierda (giro a la izquierda)
 //   leftX / rightY : normalizados igualmente; sin uso por ahora.
 struct GamepadState {
-    // Valores RAW tal como llegan en el HID report (para debug)
-    int16_t rawLeftX, rawLeftY, rawRightX, rawRightY;
+    // Valores RAW del Xbox 1708: uint16 little-endian, 0..65535 (centro 32768)
+    uint16_t rawLeftX, rawLeftY, rawRightX, rawRightY;
 
     // Valores normalizados a [-1000, +1000] con deadzone aplicada
     int16_t leftX, leftY, rightX, rightY;
 
-    // Botones (reservados para funciones futuras)
+    // Botones principales (bits reales del layout Xbox 1708)
     bool buttonA, buttonB, buttonX, buttonY;
+
+    // D-Pad crudo (byte 12): 1=arriba, 2=arriba-der, ..., 8=arriba-izq, 0=none
+    uint8_t dpad;
 
     // true mientras haya un mando conectado y reportando
     bool connected;

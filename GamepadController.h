@@ -46,6 +46,12 @@
 // Tamaño máximo de un HID report (los de gamepads suelen ser <= 20 bytes)
 #define GAMEPAD_MAX_REPORT_LEN 20
 
+// DEBUG DE REPORTS HID: 1 = volcar por Serial la longitud, los bytes en hex
+// y los sticks decodificados (con throttle ~100 ms); 0 = silencio.
+#ifndef DEBUG_GAMEPAD_REPORTS
+#define DEBUG_GAMEPAD_REPORTS 0
+#endif
+
 // Timeout de cada intento de conexión en milisegundos (client->connect() es
 // bloqueante para loop()). En competencia conviene un valor corto: 2000 ms
 // evita perder el combate esperando una reconexión que no llega; subirlo a

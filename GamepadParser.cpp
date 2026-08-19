@@ -17,50 +17,66 @@
 #include "GamepadParser.h"
 
 // ============================================================================
-// MANDO OBJETIVO: Xbox Wireless Controller (Model 1914 / Series X|S) por BLE
+// MANDO OBJETIVO: Xbox Wireless Controller Model 1708 (Xbox One S) por BLE
 // ============================================================================
-// HID input report (Report ID 0x01, 14 bytes):
+// Layout verificado contra la implementación de referencia BLE-Gamepad-Client
+// (https://github.com/tbekas/BLE-Gamepad-Client), que soporta explícitamente
+// el modelo 1708, y contra el descriptor HID real del mando.
 //
-//   Byte  Contenido
-//   0     Report ID (0x01)
-//   1     LX    0..255, centro 128 (0 = izquierda, 255 = derecha)
-//   2     LY    0..255, centro 128 (0 = arriba,    255 = abajo)
-//   3     RX    0..255, centro 128 (0 = izquierda, 255 = derecha)
-//   4     RY    0..255, centro 128 (0 = arriba,    255 = abajo)
-//   5     LT    gatillo izquierdo 0..255
-//   6     RT    gatillo derecho   0..255
-//   7     Reservado (0)
-//   8     Botones 1: bit0 A, bit1 B, bit2 X, bit3 Y, bit4 LB, bit5 RB
-//   9     Botones 2: bit4 LS, bit5 RS, ...
-//   10    D-pad (0..7 direcciones, 8 = centrado)
-//   11-13 Reservados (0)
+// El mando entrega el payload de la característica Report (0x2A4D) SIN el
+// Report ID como primer byte: la referencia decodifica data[0..1] como LX.
+// Los ejes son uint16 little-endian con rango 0..65535 (centro 32768).
 //
-// IMPORTANTE: verificar este layout con el mando real usando el dump
-// [PAD] RAW... del sketch (GAMEPAD_DEBUG). Si el mando real es otro modelo
-// (p. ej. DualShock 4), ajustar report ID, offsets y rango de ejes en este
-// bloque: la arquitectura permite añadir parsers por modelo sin tocar el
-// resto del firmware.
+//   Offset  Tamaño   Campo
+//   0..1    u16 LE   Left Stick X   0 = izquierda, 32768 = centro, 65535 = derecha
+//   2..3    u16 LE   Left Stick Y   0 = arriba,    32768 = centro, 65535 = abajo
+//   4..5    u16 LE   Right Stick X  0 = izquierda, 32768 = centro, 65535 = derecha
+//   6..7    u16 LE   Right Stick Y  0 = arriba,    32768 = centro, 65535 = abajo
+//   8..9    u16 LE   Left Trigger   0..1023
+//   10..11  u16 LE   Right Trigger  0..1023
+//   12      1 byte   D-Pad          1=arriba, 2=arriba-der, ..., 8=arriba-izq, 0=none
+//   13      1 byte   Botones 1      A=0x01, B=0x02, X=0x08, Y=0x10, LB=0x40, RB=0x80
+//   14      1 byte   Botones 2      View=0x04, Menu=0x08, Xbox=0x10, LS=0x20, RS=0x40
+//   15      1 byte   Botones 3      Share=0x01  [solo en el reporte de 16 bytes]
+//
+// Longitudes soportadas (variantes reales del 1708):
+//   - 16 bytes: reporte completo (incluye el byte 15 de Share).
+//   - 15 bytes: el descriptor puede anunciar 16 bytes mientras el firmware
+//     transmite 15 (documentado en ciertos 1708 con firmware moderno). Se
+//     parsean los offsets 0..14 y el campo de 16 bytes queda en false; NO se
+//     desplazan los offsets para compensar el tamaño.
+//   - 17 bytes: variante que SÍ incluye el Report ID 0x01 como primer byte
+//     (depende de cómo cada stack BLE entregue el valor); se salta ese byte.
 // ============================================================================
 
-static constexpr uint8_t XBOX_REPORT_ID   = 0x01;
+static constexpr uint8_t XBOX_REPORT_ID = 0x01;
 
-static constexpr uint8_t OFF_LX = 1;
+// Offsets del payload (sin contar el posible Report ID)
+static constexpr uint8_t OFF_LX = 0;
 static constexpr uint8_t OFF_LY = 2;
-static constexpr uint8_t OFF_RX = 3;
-static constexpr uint8_t OFF_RY = 4;
-static constexpr uint8_t OFF_BUTTONS_1 = 8;
+static constexpr uint8_t OFF_RX = 4;
+static constexpr uint8_t OFF_RY = 6;
+static constexpr uint8_t OFF_DPAD = 12;
+static constexpr uint8_t OFF_BUTTONS_1 = 13;
+static constexpr uint8_t OFF_BUTTONS_2 = 14;
+static constexpr uint8_t OFF_BUTTONS_3 = 15;
 
-static constexpr int16_t AXIS_MIN    = 0;
-static constexpr int16_t AXIS_MAX    = 255;
-static constexpr int16_t AXIS_CENTER = 128;
+// Longitudes válidas del payload (variantes reales del 1708)
+static constexpr uint8_t MIN_REPORT_LEN = 15;
+static constexpr uint8_t MAX_REPORT_LEN = 16;
+
+// Rango de los ejes (uint16 LE, centro 32768)
+static constexpr int32_t AXIS_MIN    = 0;
+static constexpr int32_t AXIS_MAX    = 65535;
+static constexpr int32_t AXIS_CENTER = 32768;
 
 // Deadzone en % del recorrido útil del joystick (por lado del centro).
 static constexpr uint8_t GAMEPAD_DEADZONE_PERCENT = 10;
 
-// Polaridad de los ejes según este HID report:
-//   LY: arriba (0) = adelante     -> invertir el eje
-//   RX: derecha (255) = girar der.-> no invertir
-//   LX / RY: sin uso, solo se dejan normalizados por consistencia.
+// Polaridad de los ejes según el layout real del 1708:
+//   LY: arriba (0) = adelante          -> invertir el eje
+//   RX: derecha (65535) = girar der.   -> no invertir
+//   LX / RY: sin uso, normalizados por consistencia.
 static constexpr bool INVERT_LX = false;
 static constexpr bool INVERT_LY = true;
 static constexpr bool INVERT_RX = false;
@@ -68,29 +84,53 @@ static constexpr bool INVERT_RY = true;
 
 GamepadParser::GamepadParser() {}
 
+// Une dos bytes little-endian en un uint16 (rango del mando: 0..65535).
+static uint16_t makeUint16(const uint8_t* p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
 bool GamepadParser::parseReport(const uint8_t* data, size_t len, GamepadState& out) const {
-    if (data == nullptr || len < 5 || data[0] != XBOX_REPORT_ID) {
+    if (data == nullptr || len == 0) {
         return false;
     }
 
-    out.rawLeftX  = data[OFF_LX];
-    out.rawLeftY  = data[OFF_LY];
-    out.rawRightX = data[OFF_RX];
-    out.rawRightY = data[OFF_RY];
-
-    out.leftX  = normalizeAxis(data[OFF_LX], AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_LX);
-    out.leftY  = normalizeAxis(data[OFF_LY], AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_LY);
-    out.rightX = normalizeAxis(data[OFF_RX], AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_RX);
-    out.rightY = normalizeAxis(data[OFF_RY], AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_RY);
-
-    if (len > OFF_BUTTONS_1) {
-        out.buttonA = (data[OFF_BUTTONS_1] & 0x01) != 0;
-        out.buttonB = (data[OFF_BUTTONS_1] & 0x02) != 0;
-        out.buttonX = (data[OFF_BUTTONS_1] & 0x04) != 0;
-        out.buttonY = (data[OFF_BUTTONS_1] & 0x08) != 0;
-    } else {
-        out.buttonA = out.buttonB = out.buttonX = out.buttonY = false;
+    // Variante que incluye el Report ID (según el stack BLE): se salta el
+    // primer byte. La variante principal (sin ID) no exige data[0] == 0x01.
+    size_t offset = 0;
+    if (len == (size_t)MAX_REPORT_LEN + 1 && data[0] == XBOX_REPORT_ID) {
+        offset = 1;
     }
+    size_t payloadLen = len - offset;
+
+    // Solo las longitudes reales del 1708 (15 y 16 bytes) son válidas.
+    if (payloadLen < MIN_REPORT_LEN || payloadLen > MAX_REPORT_LEN) {
+        return false;
+    }
+
+    const uint8_t* p = data + offset;
+
+    uint16_t lx = makeUint16(p + OFF_LX);
+    uint16_t ly = makeUint16(p + OFF_LY);
+    uint16_t rx = makeUint16(p + OFF_RX);
+    uint16_t ry = makeUint16(p + OFF_RY);
+
+    out.rawLeftX  = lx;
+    out.rawLeftY  = ly;
+    out.rawRightX = rx;
+    out.rawRightY = ry;
+
+    out.leftX  = normalizeAxis(lx, AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_LX);
+    out.leftY  = normalizeAxis(ly, AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_LY);
+    out.rightX = normalizeAxis(rx, AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_RX);
+    out.rightY = normalizeAxis(ry, AXIS_CENTER, AXIS_MIN, AXIS_MAX, INVERT_RY);
+
+    out.dpad = p[OFF_DPAD];
+
+    // Botones 1 (byte 13): A=bit0, B=bit1, X=bit3, Y=bit4 (layout real 1708)
+    out.buttonA = (p[OFF_BUTTONS_1] & 0x01) != 0;
+    out.buttonB = (p[OFF_BUTTONS_1] & 0x02) != 0;
+    out.buttonX = (p[OFF_BUTTONS_1] & 0x08) != 0;
+    out.buttonY = (p[OFF_BUTTONS_1] & 0x10) != 0;
 
     out.connected = true;
     return true;
