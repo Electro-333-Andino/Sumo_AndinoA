@@ -152,8 +152,11 @@ servicio HID y se suscribe al **Input Report**.
 El escaneo es **activo** (recibe el Scan Response, donde el Xbox anuncia nombre
 y fabricante) y solo acepta el mando objetivo:
 
-*   **Caso A — tiene nombre:** se acepta solamente si el nombre contiene
-    `Xbox Wireless Controller`.
+*   **Caso A — tiene nombre:** se acepta si el nombre anunciado corresponde al
+    Xbox, en cualquiera de sus dos formatos:
+    *   **Nombre completo** (Complete Local Name): contiene `Xbox Wireless Controller`.
+    *   **Nombre acortado** (Shortened Local Name): es un prefijo del objetivo
+        (p. ej. `Xbox Wireless Cont`) **y** el fabricante es Microsoft.
 *   **Caso B — no tiene nombre:** se acepta solamente si cumple **ambas**
     condiciones: Appearance dentro del rango HID (`0x0380`–`0x039F`) **y**
     Manufacturer Data de Microsoft (`0x0006`).
@@ -173,8 +176,9 @@ convierte en el controlador del robot.
 3. Mantén pulsado el botón Pair del mando hasta que el LED parpadee.
 4. El ESP32 escanea y identifica "Xbox Wireless Controller".
 5. Se realiza la conexión BLE y el pairing (automático, sin PIN).
-6. Se descubre el HID y se activan las notificaciones del Input Report.
-7. Al recibir el primer reporte válido, el robot queda listo.
+6. Se descubren los atributos GATT y el servicio HID 0x1812.
+7. Se activan las notificaciones del Input Report.
+8. Al recibir el primer reporte válido, el robot queda listo.
 ```
 
 ### Estados de la conexión
@@ -283,6 +287,7 @@ del mando:
 [GAMEPAD] CONNECTING
 [GAMEPAD] CONNECTED
 [GAMEPAD] SECURITY OK
+[GAMEPAD] GATT ATTRIBUTES FOUND
 [GAMEPAD] HID SERVICE FOUND
 [GAMEPAD] INPUT REPORT FOUND (Report Reference)
 [GAMEPAD] NOTIFY ENABLED

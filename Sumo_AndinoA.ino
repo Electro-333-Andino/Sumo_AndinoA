@@ -60,6 +60,7 @@ uint16_t DEFAULT_SPEED_RIGHT = 1023;
 uint16_t DEFAULT_TURN_SPEED  = 1023;
 
 // DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZADO/SALIDA por Serial; 0 = silencio
+// TEMPORAL: activado (1) para diagnóstico; volver a 0 en el firmware final.
 #ifndef GAMEPAD_DEBUG
 #define GAMEPAD_DEBUG 1
 #endif

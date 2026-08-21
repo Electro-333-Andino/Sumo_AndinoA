@@ -52,14 +52,18 @@
 
 // DEBUG DE REPORTS HID: 1 = volcar por Serial la longitud, los bytes en hex
 // y los sticks decodificados (con throttle ~100 ms); 0 = silencio.
+// TEMPORAL: activado (1) para diagnóstico del mando en el monitor serie;
+// volver a 0 en el firmware final.
 #ifndef DEBUG_GAMEPAD_REPORTS
-#define DEBUG_GAMEPAD_REPORTS 0
+#define DEBUG_GAMEPAD_REPORTS 1
 #endif
 
 // DEBUG DE ESCANEO: 1 = imprime por dispositivo visto su dirección, nombre,
 // RSSI, appearance y manufacturer data; 0 = solo logs de etapa (producción).
+// TEMPORAL: activado (1) para diagnóstico del mando en el monitor serie;
+// volver a 0 en el firmware final.
 #ifndef GAMEPAD_DEBUG_SCAN
-#define GAMEPAD_DEBUG_SCAN 0
+#define GAMEPAD_DEBUG_SCAN 1
 #endif
 
 // Callback de seguridad: se invoca para detener el robot ante desconexión,
@@ -116,8 +120,11 @@ private:
     NimBLEScan* scan;
     NimBLEClient* client;
 
-    NimBLEAddress padAddress;   // mando objetivo identificado
-    bool haveAddress;
+    // Copia del mando objetivo identificado en el escaneo. Se conserva el
+    // NimBLEAdvertisedDevice completo (no solo la MAC) para que connect() use
+    // la dirección Y su tipo (public/random) exactamente como se anunció.
+    NimBLEAdvertisedDevice padDevice;
+    bool haveDevice;
 
     Phase phase;
     volatile bool foundDevice;  // el escaneo identificó un mando válido

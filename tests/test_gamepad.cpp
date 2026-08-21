@@ -252,6 +252,33 @@ static void testFilter() {
 
   // F10 — Nombre correcto (subcadena) aunque el dispositivo anuncie poco -> aceptado
   check("F10 name substring", (int32_t)evaluate(true, "Xbox Wireless Controller 1234", false, 0, false, 0) == (int32_t)MatchResult::NAME_MATCH, 1);
+
+  // F11 — Nombre acortado (prefijo del objetivo) + fabricante Microsoft -> aceptado
+  check("F11 short name + MS", (int32_t)evaluate(true, "Xbox Wire", false, 0, true, MICROSOFT_COMPANY_ID) == (int32_t)MatchResult::NAME_MATCH, 1);
+
+  // F12 — Nombre acortado SIN fabricante Microsoft -> rechazado
+  check("F12 short name no MS", (int32_t)evaluate(true, "Xbox Wire", false, 0, false, 0) == (int32_t)MatchResult::NO_MATCH, 1);
+
+  // F13 — Prefijo demasiado corto aunque sea Microsoft -> rechazado
+  check("F13 too short prefix", (int32_t)evaluate(true, "Xbox", false, 0, true, MICROSOFT_COMPANY_ID) == (int32_t)MatchResult::NO_MATCH, 1);
+
+  // F14 — Nombre que no es prefijo ni contiene el objetivo -> rechazado
+  check("F14 not a prefix", (int32_t)evaluate(true, "Xbox 360 Controller", false, 0, true, MICROSOFT_COMPANY_ID) == (int32_t)MatchResult::NO_MATCH, 1);
+
+  // F15 — resolveName: prioridad al nombre completo sobre el acortado
+  check("F15 full over short", (int32_t)(resolveName("Xbox Wireless Controller", "Xbox Wire") == "Xbox Wireless Controller"), 1);
+
+  // F16 — resolveName: solo acortado -> se usa el acortado
+  check("F16 short only", (int32_t)(resolveName("", "Xbox Wire") == "Xbox Wire"), 1);
+
+  // F17 — resolveName: solo completo -> se usa el completo
+  check("F17 full only", (int32_t)(resolveName("Xbox Wireless Controller", "") == "Xbox Wireless Controller"), 1);
+
+  // F18 — resolveName: ninguno -> vacío (el dispositivo queda sin nombre)
+  check("F18 no name", (int32_t)resolveName("", "").empty(), 1);
+
+  // F19 — Integración: acortado que es prefijo del objetivo + MS -> Caso A
+  check("F19 short name integration", (int32_t)evaluate(true, resolveName("", "Xbox Wireless Cont"), false, 0, true, MICROSOFT_COMPANY_ID) == (int32_t)MatchResult::NAME_MATCH, 1);
 }
 
 // ---------------------------------------------------------------------------

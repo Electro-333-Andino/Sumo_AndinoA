@@ -48,6 +48,23 @@ namespace GamepadFilter {
 // Nombre anunciado por el Xbox 1708 (se busca como subcadena)
 static constexpr const char* TARGET_NAME = "Xbox Wireless Controller";
 
+// Longitud mínima de un nombre ACORTADO para aceptarlo como prefijo del
+// objetivo (evita aceptar prefijos triviales como "X" o "Xbox").
+static constexpr size_t MIN_SHORT_NAME_LEN = 8;
+
+// AD types de nombre del advertising BLE (Bluetooth Assigned Numbers)
+static constexpr uint8_t AD_TYPE_COMPLETE_NAME = 0x09; // Complete Local Name
+static constexpr uint8_t AD_TYPE_SHORT_NAME    = 0x08; // Shortened Local Name
+
+// Nombre efectivo del dispositivo: prioridad al nombre completo (0x09); si no
+// está anunciado, se usa el acortado (0x08). El Xbox 1708 puede anunciar
+// cualquiera de los dos formatos.
+inline std::string resolveName(const std::string& completeName,
+                               const std::string& shortName) {
+    if (!completeName.empty()) return completeName;
+    return shortName;
+}
+
 // Rango de Appearance del perfil HID (Bluetooth Assigned Numbers)
 static constexpr uint16_t HID_APPEARANCE_MIN = 0x0380;
 static constexpr uint16_t HID_APPEARANCE_MAX = 0x039F;
@@ -73,9 +90,22 @@ inline MatchResult evaluate(bool hasName, const std::string& name,
                             bool hasManufacturerData, uint16_t manufacturerId) {
     // Caso A: dispositivo con nombre
     if (hasName && !name.empty()) {
+        // Nombre COMPLETO: el nombre anunciado contiene el objetivo
+        // (cubre subcadenas como "Xbox Wireless Controller 1234").
         if (name.find(TARGET_NAME) != std::string::npos) {
             return MatchResult::NAME_MATCH;
         }
+
+        // Nombre ACORTADO (Shortened Local Name): es un truncamiento del
+        // nombre completo (p. ej. "Xbox Wireless Cont"). Se acepta si es un
+        // prefijo del objetivo, tiene una longitud mínima y, como respaldo de
+        // seguridad, el fabricante es Microsoft.
+        if (name.length() >= MIN_SHORT_NAME_LEN &&
+            std::string(TARGET_NAME).compare(0, name.length(), name) == 0 &&
+            hasManufacturerData && manufacturerId == MICROSOFT_COMPANY_ID) {
+            return MatchResult::NAME_MATCH;
+        }
+
         return MatchResult::NO_MATCH; // nombre distinto: rechazado
     }
 

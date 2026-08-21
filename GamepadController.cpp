@@ -44,13 +44,20 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         instance->noteScanResult(advertisedDevice);
 
         // IDENTIFICACIÓN ESTRICTA del Xbox 1708 (GamepadFilter):
-        //   Caso A: nombre "Xbox Wireless Controller".
+        //   Caso A: nombre "Xbox Wireless Controller" (completo o acortado).
         //   Caso B (sin nombre): appearance HID + manufacturer Microsoft.
         // Un dispositivo desconocido jamás se acepta ni detiene el escaneo.
-        std::string name;
-        if (advertisedDevice->haveName()) {
-            name = advertisedDevice->getName();
-        }
+        //
+        // Nombre: se soporta el Complete Local Name (0x09) y el Shortened/
+        // Incomplete Local Name (0x08). getName() ya prefiere el completo y
+        // usa el acortado como respaldo; además se consulta explícitamente el
+        // acortado con getPayloadByType() para garantizar el soporte de ambos
+        // formatos y pasar la decisión por resolveName() (prioridad al completo).
+        std::string fullName = advertisedDevice->getName();
+        std::string shortName =
+            advertisedDevice->getPayloadByType(BLE_HS_ADV_TYPE_INCOMP_NAME);
+        std::string name = GamepadFilter::resolveName(fullName, shortName);
+        bool hasName = !name.empty();
 
         bool hasManufacturerData = false;
         uint16_t manufacturerId = 0;
@@ -66,7 +73,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         uint16_t appearance = hasAppearance ? advertisedDevice->getAppearance() : 0;
 
         GamepadFilter::MatchResult match = GamepadFilter::evaluate(
-            advertisedDevice->haveName(), name,
+            hasName, name,
             hasAppearance, appearance,
             hasManufacturerData, manufacturerId);
 
@@ -106,7 +113,7 @@ static void onReportNotify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, si
 // --- Implementación ---
 
 GamepadController::GamepadController()
-    : scan(nullptr), client(nullptr), haveAddress(false),
+    : scan(nullptr), client(nullptr), haveDevice(false),
       phase(Phase::SCANNING), foundDevice(false), scanFinished(false),
       devicesSeen(0), linkLost(false),
       connected(false), notifyEnabled(false), connectedAt(0),
@@ -249,6 +256,12 @@ void GamepadController::update() {
                           state.leftX, state.leftY,
                           state.rightX, state.rightY);
 #endif
+        } else {
+#if DEBUG_GAMEPAD_REPORTS
+            // Ayuda al diagnóstico: el mando reporta pero el parser rechaza.
+            // Con la longitud se ve si el 1708 envía 16 bytes o una variante.
+            Serial.printf("[GAMEPAD] Report rejected: len=%u (esperado 16)\n", (unsigned)len);
+#endif
         }
     }
 
@@ -304,8 +317,8 @@ void GamepadController::update() {
 }
 
 void GamepadController::connectToPad() {
-    if (!haveAddress) {
-        failAndRetry("connect", "no target address");
+    if (!haveDevice) {
+        failAndRetry("connect", "no target device");
         return;
     }
 
@@ -325,7 +338,11 @@ void GamepadController::connectToPad() {
     }
 
     // connect() es bloqueante; el timeout (setConnectTimeout) limita la espera.
-    if (!client->connect(padAddress)) {
+    // Se conecta con el NimBLEAdvertisedDevice identificado (no solo con la
+    // MAC): así se preserva el TIPO de dirección (public/random) del advertising,
+    // imprescindible para el Xbox 1708, que puede anunciarse con dirección
+    // aleatoria. El segundo argumento (true) borra la caché de atributos previa.
+    if (!client->connect(padDevice, true)) {
         client->disconnect();
         failAndRetry("connect", "connection refused");
         return;
@@ -342,7 +359,16 @@ void GamepadController::connectToPad() {
     }
     Serial.println("[GAMEPAD] SECURITY OK");
 
-    // Descubrir el servicio HID (el descubrimiento GATT es automático en NimBLE)
+    // Descubrimiento GATT EXPLÍCITO: garantiza que servicios, características
+    // y descriptores queden en caché ANTES de buscar el HID (0x1812). Se hace
+    // sobre el enlace cifrado, que es donde el mando expone sus atributos.
+    if (!client->discoverAttributes()) {
+        failAndRetry("gatt discovery", "attribute discovery failed");
+        return;
+    }
+    Serial.println("[GAMEPAD] GATT ATTRIBUTES FOUND");
+
+    // Descubrir el servicio HID (ya en caché por el descubrimiento explícito)
     NimBLERemoteService* hidService =
         client->getService(NimBLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
     if (hidService == nullptr) {
@@ -476,13 +502,16 @@ void GamepadController::noteScanResult(const NimBLEAdvertisedDevice* device) {
 }
 
 void GamepadController::rememberFoundDevice(const NimBLEAdvertisedDevice* device) {
-    padAddress = device->getAddress();
-    haveAddress = true;
+    // Copia del dispositivo anunciado: conserva la MAC y el TIPO de dirección
+    // del advertising (public/random). Guardar solo la MAC haría que connect()
+    // asumiera dirección pública y fallara con un mando de dirección aleatoria.
+    padDevice = *device;
+    haveDevice = true;
     foundDevice = true;
 
     Serial.print("[GAMEPAD] CANDIDATE FOUND");
 #if GAMEPAD_DEBUG_SCAN
-    Serial.printf(" addr=%s", padAddress.toString().c_str());
+    Serial.printf(" addr=%s", padDevice.getAddress().toString().c_str());
 #endif
     if (device->haveName()) {
         Serial.printf(" name='%s'", device->getName().c_str());
