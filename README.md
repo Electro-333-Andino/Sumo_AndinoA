@@ -1,153 +1,177 @@
-# SumoAndinoA — Robot Mini-Sumo con control dual BLE
+# SumoAndinoA — Robot Mini-Sumo con control dual por BLE
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/Platform-ESP32--C3-orange.svg)](https://www.espressif.com/en/products/socs/esp32)
-[![Nivel](https://img.shields.io/badge/Nivel-Principiante%20%2F%20Educativo-brightgreen.svg)](#)
+[![BLE](https://img.shields.io/badge/BLE-NimBLE--Arduino-green.svg)](https://github.com/h2zero/NimBLE-Arduino)
 
-**SumoAndinoA** es un firmware de control para un robot **Mini-Sumo** construido alrededor de un **ESP32-C3** y un driver de motores **TB6612FNG**. El robot puede controlarse de dos maneras:
+**SumoAndinoA** es el firmware de un robot **Mini-Sumo** construido con un
+**ESP32-C3** y un driver de motores **TB6612FNG**. El robot se controla de forma
+inalámbrica por Bluetooth Low Energy (BLE) de dos maneras, una a la vez:
 
-1. **Desde un teléfono Android** mediante Bluetooth Low Energy (BLE).
-2. **Desde un mando Bluetooth** con dos joysticks (estilo Xbox/PlayStation), con **control proporcional de velocidad**.
+1. **Modo App** — desde un teléfono Android con una app BLE.
+2. **Modo Xbox** — desde un mando **Xbox Wireless Controller** (modelo 1708).
 
-El código está organizado en módulos pequeños y documentados, pensado para que sea fácil de leer, modificar y ampliar. Es una base sólida para estudiantes, aficionados y entusiastas que se inician en la robótica de competición.
+Los dos modos conviven en el mismo firmware y se eligen con un único botón
+físico: el botón **BOOT** del propio ESP32-C3. No se necesitan botones externos
+ni comandos especiales para cambiar de modo.
+
+El código está organizado en módulos pequeños, documentados en español y
+diseñados para que cualquier persona pueda leerlos, modificarlos y ampliarlos
+sin romper el resto del sistema.
 
 ---
 
 ## Características
 
-*   **Control inalámbrico dual BLE (modos mutuamente excluyentes)**
-    *   **Modo App:** teléfono Android mediante el protocolo de texto del firmware.
-    *   **Modo Xbox:** mando Bluetooth (HID) con joysticks y control proporcional de velocidad.
-    *   Solo se inicializa el stack BLE del modo activo (ahorra RAM y evita conflictos).
+*   **Control dual BLE con modos excluyentes**
+    *   Solo se inicializa el stack BLE del modo activo: menos RAM y cero conflictos.
+    *   El modo elegido se guarda en memoria (NVS) y se mantiene al apagar y encender.
 *   **Control proporcional con mezcla diferencial**
-    *   El stick izquierdo (eje Y) controla avance/retroceso.
-    *   El stick derecho (eje X) controla los giros.
-    *   La velocidad aumenta progresivamente según cuánto se desplace el joystick (respuesta lineal con deadzone configurable).
-*   **Velocidad máxima única (`configuredSpeed`)**
-    *   La configura el teléfono y el mando la reutiliza automáticamente; no existe una segunda configuración independiente.
-*   **Selección de modo con el botón BOOT (fail-safe físico)**
-    *   El único mecanismo para cambiar de modo es el botón interno **BOOT** (GPIO 9):
-        mantenerlo presionado 3 segundos invierte el modo y reinicia.
-    *   El modo activo se guarda en NVS (Preferences, namespace `Andino_Sumo`) y el LED
-        indica el modo al arrancar (1 parpadeo lento = App, 2 rápidos = Xbox).
+    *   La velocidad crece suavemente según cuánto muevas el joystick (respuesta lineal con deadzone).
 *   **Seguridad integrada (anti-escape)**
-    *   Parada inmediata de los motores ante cualquier desconexión.
-    *   Watchdog del teléfono: 1,5 s sin comandos → parada preventiva.
-    *   Watchdog del mando: 200 ms sin reports HID → parada preventiva.
+    *   Parada inmediata de los motores ante cualquier desconexión o pérdida de señal.
 *   **Indicador LED de estado**
-    *   Parpadeo rápido: buscando conexión.
-    *   Parpadeo lento: conectado (teléfono o mando).
-*   **Ligero y orientado al ESP32-C3**
-    *   Sin librerías pesadas de gamepads; buffers estáticos y aritmética entera para minimizar el consumo de RAM y flash.
+    *   Parpadeo rápido: buscando conexión. Parpadeo lento: conectado.
+*   **Ligero y pensado para el ESP32-C3**
+    *   Sin librerías pesadas de gamepads; buffers estáticos y aritmética entera.
 
 ---
 
-## Requisitos de hardware
+## Hardware necesario
 
 | Componente | Descripción |
 | :--- | :--- |
-| Microcontrolador | ESP32-C3 (solo BLE, no dispone de Bluetooth Classic) |
+| Microcontrolador | **ESP32-C3** (solo BLE; no tiene Bluetooth Classic) |
 | Driver de motores | TB6612FNG (puente H dual) |
-| Motores | 2 motores DC con caja reductora |
-| Alimentación | Batería para el driver y 3,3 V/5 V para el ESP32 |
-| Control remoto | Teléfono Android con app BLE y/o mando Bluetooth compatible con HID |
+| Motores | 2 motores DC con reductora |
+| Alimentación | Batería para los motores y 3,3 V / 5 V para el ESP32 |
+| Control remoto | Teléfono Android con app BLE y/o mando Xbox Wireless Controller 1708 |
 
-> **Nota sobre el mando:** el firmware incluye el parser del formato HID de un **Xbox Wireless Controller** (Report ID `0x01`). Para usar otro modelo (p. ej. DualShock 4), basta con ajustar las constantes al inicio de `GamepadParser.cpp`; la arquitectura permite añadir parsers específicos sin tocar el resto del firmware.
+> **Mando soportado:** Xbox Wireless Controller **Model 1708** (Xbox One S),
+> conectado por BLE usando el perfil HID. Otros mandos HID (p. ej. PlayStation)
+> requieren ajustar el parser en `GamepadParser.cpp`; la arquitectura ya está
+> preparada para ello.
 
 ---
 
 ## Conexiones del hardware (pinout)
 
-Conecta el **ESP32-C3** al **TB6612FNG** según la siguiente tabla:
+Conecta el **ESP32-C3** al **TB6612FNG** tal y como indica la tabla. Estos pines
+son fijos y no deben cambiarse sin recalibrar el robot:
 
-| Pin ESP32 | Etiqueta en código | Función en el TB6612FNG | Descripción |
+| Pin ESP32-C3 | Etiqueta en código | Conexión en el TB6612FNG | Función |
 | :---: | :--- | :--- | :--- |
-| **8** | `PIN_LED` | — | LED de estado (conexión) |
+| **8** | `PIN_LED` | — | LED de estado |
 | **5** | `PIN_ENA` | **PWMA** | Velocidad del motor izquierdo (PWM) |
-| **6** | `PIN_IN1` | **AIN1** | Sentido de giro del motor izquierdo |
-| **20** | `PIN_IN2` | **AIN2** | Sentido de giro del motor izquierdo |
+| **6** | `PIN_IN1` | **AIN1** | Sentido del motor izquierdo |
+| **20** | `PIN_IN2` | **AIN2** | Sentido del motor izquierdo |
 | **0** | `PIN_ENB` | **PWMB** | Velocidad del motor derecho (PWM) |
-| **1** | `PIN_IN3` | **BIN1** | Sentido de giro del motor derecho |
-| **4** | `PIN_IN4` | **BIN2** | Sentido de giro del motor derecho |
-| **7** | `PIN_STBY` | **STBY** | Habilitación general del driver (standby) |
+| **1** | `PIN_IN3` | **BIN1** | Sentido del motor derecho |
+| **4** | `PIN_IN4` | **BIN2** | Sentido del motor derecho |
+| **7** | `PIN_STBY` | **STBY** | Habilitación general del driver |
+| **9** | `PIN_BOOT` | — | Botón interno del ESP32 (cambio de modo) |
 
-El PWM se configura a **5 kHz con resolución de 10 bits**, por lo que las velocidades se expresan en el rango **0 – 1023**.
+El PWM se configura a **5 kHz con resolución de 10 bits**: las velocidades se
+expresan en el rango **0 – 1023**.
 
 ---
 
-## Control desde el teléfono (protocolo BLE)
+## Modos de operación
 
-El robot se anuncia como **`Andino_Sumo`** (nombre configurable en `Sumo_AndinoA.ino`). La aplicación envía cadenas de texto por la característica de escritura del servicio BLE:
+El robot arranca siempre en uno de estos dos modos, guardados en NVS:
 
-| UUID | Descripción |
+| Modo | Valor `opMode` | Fuente de control |
+| :--- | :---: | :--- |
+| **App** | `0` (por defecto) | Teléfono Android (servidor BLE) |
+| **Xbox** | `1` | Mando Xbox 1708 (cliente BLE HID) |
+
+### Cómo cambiar de modo
+
+1. Mantén presionado el botón **BOOT** del ESP32-C3 durante **3 segundos**.
+2. El modo se invierte, se guarda en memoria y el robot se reinicia.
+
+Al arrancar, el LED indica el modo activo:
+
+*   **1 parpadeo lento** → Modo App.
+*   **2 parpadeos rápidos** → Modo Xbox.
+
+---
+
+## Modo App — control desde el teléfono
+
+En este modo el robot actúa como un **servidor BLE** y se anuncia con el nombre
+**`Robotini16`** (configurable en `Sumo_AndinoA.ino`). La app se conecta y envía
+comandos de texto por la característica de escritura.
+
+### Servicio y características
+
+| Elemento | UUID |
 | :--- | :--- |
 | Servicio | `D5C4A74E-B869-4744-90D8-37BB68B6ABBC` |
-| Característica RX (app → ESP32) | `5ED81982-1610-4A5D-979B-98E58EF12D31` — escritura de comandos |
-| Característica TX (ESP32 → app) | `D2904D82-9FBF-4BD1-86FB-84D2C89E40A0` — notificaciones |
+| RX (app → ESP32) | `5ED81982-1610-4A5D-979B-98E58EF12D31` |
+| TX (ESP32 → app) | `D2904D82-9FBF-4BD1-86FB-84D2C89E40A0` |
 
-### Comandos de movimiento
+### Protocolo de comandos
 
-Formato general: `DIRECCIÓN,VEL_IZQ,VEL_DER` (velocidades de `0` a `1023`):
+Formato general: `DIRECCIÓN,VEL_IZQ,VEL_DER`, con velocidades de **0 a 1023**:
 
-| Comando | Descripción |
-| :--- | :--- |
-| `F,1023,1023` | Avanza a máxima velocidad |
-| `B,800,800` | Retrocede a velocidad controlada |
-| `L` | Gira sobre su propio eje a la izquierda |
-| `R` | Gira sobre su propio eje a la derecha |
-| `S` | Frena en seco |
+| Comando | Ejemplo | Descripción |
+| :--- | :--- | :--- |
+| `F` | `F,1023,1023` | Avanza a la velocidad indicada |
+| `B` | `B,800,800` | Retrocede a la velocidad indicada |
+| `L` | `L` o `L,500,500` | Gira a la izquierda (sin velocidades: 1023) |
+| `R` | `R` o `R,500,500` | Gira a la derecha (sin velocidades: 1023) |
+| `S` | `S` | Frena en seco |
 
-> La velocidad configurada por el teléfono (p. ej. `F,700,700`) queda registrada como **`configuredSpeed`** y es la misma que utiliza el mando como límite máximo.
+> **Velocidad compartida:** el último comando del teléfono fija `configuredSpeed`,
+> que el modo Xbox reutiliza como velocidad máxima del mando.
 
 ---
 
-## Control con mando Bluetooth
+## Modo Xbox — control con el mando
 
-**Mando soportado:** Xbox Wireless Controller Model 1708 (Xbox One S)
+En este modo el ESP32 actúa como **cliente BLE (central)**: escanea, detecta el
+mando, se conecta, hace el emparejamiento (pairing automático, sin PIN) y se
+suscribe a las notificaciones HID.
 
 | Parámetro | Valor |
 | :--- | :--- |
+| Mando soportado | Xbox Wireless Controller Model 1708 |
 | Protocolo | Bluetooth Low Energy (BLE) |
-| ESP32 | ESP32-C3 |
 | HID Service | `0x1812` |
 | HID Report | `0x2A4D` |
-| Ejes | uint16 LE, 0..65535 (centro 32768) |
-
-El firmware actúa como **cliente BLE (central)**: escanea, detecta el mando, se
-conecta, realiza el pairing (Secure Connections + Bonding, Just Works) y se
-suscribe a las notificaciones del HID Report. El layout exacto del reporte
-(offsets de ejes, triggers, D-Pad y botones) está documentado en
-`GamepadParser.cpp` y soporta las variantes reales del 1708 (15 y 16 bytes,
-con y sin Report ID).
+| Formato de ejes | uint16 little-endian, centro 32768 |
 
 ### Procedimiento de conexión
 
 ```text
-1. Encender el robot (Modo Xbox).
-2. Encender el mando con el botón Xbox.
-3. Mantener pulsado el botón Pair del mando hasta que el LED parpadee.
+1. Enciende el robot (debe estar en Modo Xbox).
+2. Enciende el mando con el botón Xbox.
+3. Mantén pulsado el botón Pair del mando hasta que el LED parpadee.
 4. El ESP32 escanea y encuentra "Xbox Wireless Controller".
 5. Se realiza la conexión BLE y el pairing (automático, sin PIN).
-6. Se suscriben las notificaciones HID.
-7. Los controles quedan activos (Serial: "[GAMEPAD] Notification enabled").
+6. Se activan las notificaciones HID y el robot queda listo.
 ```
+
+Si el mando se desconecta, el ESP32 lo detecta, detiene el robot y vuelve a
+escaneando automáticamente para reconectarse.
 
 ### Mapa de control
 
 | Control | Acción |
 | :--- | :--- |
-| **Stick izquierdo, eje Y** | Avance (arriba) / retroceso (abajo) / detenerse (centro) |
-| **Stick derecho, eje X** | Giro a la derecha / giro a la izquierda / sin giro (centro) |
+| **Stick izquierdo, eje Y** | Arriba = avanza · abajo = retrocede · centro = se detiene |
+| **Stick derecho, eje X** | Derecha = gira a la derecha · izquierda = gira a la izquierda |
 
 ### Velocidad proporcional
 
-La velocidad no es un simple interruptor de dirección: crece de forma proporcional al desplazamiento del joystick y nunca supera `configuredSpeed`.
-
-Con `configuredSpeed = 700`:
+La velocidad no es un interruptor: crece de forma proporcional a cuánto
+desplaces el joystick y nunca supera `configuredSpeed`. Con
+`configuredSpeed = 700`, por ejemplo:
 
 | Posición del stick | Velocidad resultante |
 | :---: | :---: |
-| 0 % (centro) | 0 |
+| Centro (0 %) | 0 |
 | 25 % | 175 |
 | 50 % | 350 |
 | 75 % | 525 |
@@ -155,87 +179,39 @@ Con `configuredSpeed = 700`:
 
 ### Mezcla diferencial
 
-El firmware combina ambas señales por motor:
+El firmware combina ambas señales para cada motor:
 
-```
-leftMotor  = forward + turn
-rightMotor = forward − turn
-```
-
-Los resultados se limitan al rango `±configuredSpeed`. Esto permite avance con giro (motores a velocidades distintas) y giro sobre el sitio (motores en sentidos opuestos).
-
-### Seguridad
-
-*   Si el mando se desconecta o deja de transmitir, el estado pasa a
-    **desconectado**: los motores se detienen de inmediato y el robot
-    permanece detenido (no se reutiliza el último comando) hasta que llega un
-    nuevo reporte HID válido.
-*   Timeout sin reporte **válido**: **200 ms** (`GAMEPAD_TIMEOUT_MS`) → STOP +
-    desconexión + reconexión automática.
-*   Un reporte inválido **no** alimenta el watchdog ni mueve el robot.
-
-### Configuración del mando objetivo
-
-| Parámetro | Ubicación | Valor por defecto |
-| :--- | :--- | :--- |
-| Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox Wireless Controller"` (vacío = cualquier dispositivo) |
-| Validación de fabricante | `GamepadController.h` → `GAMEPAD_VALIDATE_MANUFACTURER` | 1 (exige Microsoft 0x0006) |
-| Formato del HID report | `GamepadParser.cpp` (offsets, centro, rango y polaridad) | Xbox 1708, ejes u16 LE, 15/16 bytes |
-| Deadzone | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
-| Timeout de seguridad | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
-| Debug por Serial | `Sumo_AndinoA.ino` → `GAMEPAD_DEBUG` | 1 (activo) |
-| Dump de reports HID | `GamepadController.h` → `DEBUG_GAMEPAD_REPORTS` | 0 (desactivado) |
-
-Con `GAMEPAD_DEBUG = 1` el monitor serie (115200 baudios) muestra el estado del mando para verificar el parser y la mezcla:
-
-```
-[PAD] RAW LY=0 RX=65535 | NLY=1000 NRX=1000 | L=700 R=-700
+```text
+motorIzquierdo = avance + giro
+motorDerecho   = avance − giro
 ```
 
-Con `DEBUG_GAMEPAD_REPORTS = 1` se vuelca además la longitud, los bytes en hex y los sticks decodificados (throttled a ~100 ms), útil para verificar el mando físico:
+El resultado se limita a `±configuredSpeed`. Esto permite avance con giro
+(motores a velocidades distintas) y giro sobre el sitio (motores en sentidos
+opuestos).
 
-```
-[GAMEPAD] len=16
-[GAMEPAD] data: 00 80 00 80 00 80 00 80 ...
-[GAMEPAD] LX=32768 LY=32768 RX=32768 RY=32768
-[GAMEPAD] normalized LX=0 LY=0 RX=0 RY=0
-```
+### Seguridad del mando
 
-> **Pila BLE:** todo el proyecto usa **NimBLE-Arduino** (v2.x, dependencia
-externa instalada con `arduino-cli lib install NimBLE-Arduino`), el mismo stack
-que usa la implementación de referencia del Xbox 1708 (BLE-Gamepad-Client).
-El servidor de la app (`BleManager`) y el cliente del mando
-(`GamepadController`) comparten el stack NimBLE, con menor consumo de heap
-que Bluedroid.
+*   El mando reporta continuamente (≈ cada 10 ms). Si deja de transmitir
+    durante **200 ms** (`GAMEPAD_TIMEOUT_MS`), el robot se **detiene de
+    inmediato**, pasa a estado desconectado y no vuelve a usar el último
+    comando hasta recibir un reporte nuevo y válido.
+*   Un reporte corrupto o inválido **no** mantiene vivo al robot ni lo mueve.
+*   En el arranque los motores están apagados: el robot no se mueve hasta que
+    llega el primer reporte válido del mando.
 
 ---
 
-## Modos de operación
+## Seguridad integrada (ambos modos)
 
-El robot arranca en uno de dos modos **mutuamente excluyentes**, persistidos en
-NVS (`Preferences`, namespace `sumo`, clave `opMode`). Solo se inicializa el
-stack BLE del modo activo, lo que reduce el consumo de RAM y evita conflictos.
-
-| Modo | `opMode` | Fuente de control | Cómo se activa |
-| :--- | :---: | :--- | :--- |
-| **App** | `0` (por defecto) | Teléfono Android (BLE GATT) | BOOT 3 s estando en Modo Xbox |
-| **Xbox** | `1` | Mando Bluetooth (BLE HID) | BOOT 3 s estando en Modo App |
-
-El cambio de modo se realiza **exclusivamente** con el botón interno **BOOT**
-(GPIO 9) mantenido 3 segundos: invierte `opMode` en NVS y reinicia. No se
-utilizan comandos de la app ni botones del mando para cambiar de modo.
-
-> **Nota sobre Bluepad32:** esta librería requiere Bluetooth *Classic*
-> (disponible solo en ESP32 clásico). El ESP32-C3 únicamente dispone de BLE,
-> por lo que el Modo Xbox usa el controlador BLE HID ligero del proyecto
-> (`GamepadController`), con la misma funcionalidad y sin fugas de heap.
-
-### Seguridad de la conexión (pairing)
-
-El perfil HID over GATT exige conexión encriptada y vinculada (bonding). El
-firmware configura el pairing automático **Secure Connections + Bonding** con
-capacidad `NoInputNoOutput` (Just Works, sin confirmación manual): el mando y
-el ESP32 se vinculan solos al conectar, sin interacción del usuario.
+*   **Modo App:** si el teléfono no envía comandos durante **450 ms**
+    (`COMMAND_TIMEOUT_MS`), parada preventiva.
+*   **Modo Xbox:** si no llegan reportes válidos durante **200 ms**, parada
+    preventiva y reconexión automática.
+*   En cualquier desconexión BLE, los motores se frenan **al instante** desde el
+    callback de desconexión (sin esperar al siguiente ciclo del programa).
+*   El botón BOOT sigue funcionando en ambos modos: es el único mecanismo para
+    cambiar de modo, incluso en plena competición.
 
 ---
 
@@ -243,72 +219,92 @@ el ESP32 se vinculan solos al conectar, sin interacción del usuario.
 
 | Archivo | Responsabilidad |
 | :--- | :--- |
-| `Sumo_AndinoA.ino` | Orquestación: prioridad de fuente (mando/teléfono), bucle de control del mando y parser de comandos Android |
-| `BleManager.h` / `.cpp` | Servidor BLE GATT que atiende al teléfono |
-| `GamepadController.h` / `.cpp` | Cliente BLE central: escaneo, conexión, suscripción a reports HID y reconexión |
-| `GamepadParser.h` / `.cpp` | Convierte el HID report en un `GamepadState` normalizado (deadzone, polaridad, curva de respuesta) |
-| `GamepadMixer.h` / `.cpp` | Mezcla diferencial: estado del mando → velocidades por motor |
-| `MotorController.h` / `.cpp` | Control de PWM y sentido de giro del TB6612 |
+| `Sumo_AndinoA.ino` | Orquestación: modos, botón BOOT, comandos del teléfono y bucle de control del mando |
+| `BleManager.h` / `.cpp` | Servidor BLE que atiende al teléfono Android |
+| `GamepadController.h` / `.cpp` | Cliente BLE: escaneo, conexión, pairing, suscripción HID y reconexión |
+| `GamepadParser.h` / `.cpp` | Convierte el reporte HID del mando en un estado normalizado (deadzone y polaridad) |
+| `GamepadMixer.h` / `.cpp` | Mezcla diferencial: estado del mando → velocidad de cada motor |
+| `MotorController.h` / `.cpp` | Control del PWM y del sentido de giro del TB6612 |
 | `SafetyManager.h` | Watchdog de seguridad del teléfono |
 | `StatusLed.h` / `.cpp` | Indicador LED de estado |
 
 ---
 
-## Cómo compilar y cargar el firmware
+## Compilar y cargar el firmware
 
-### Con Arduino IDE
+### Opción 1 — Arduino IDE (para empezar rápido)
 
-1.  **Instala el Arduino IDE** desde [arduino.cc](https://www.arduino.cc/en/software).
-2.  **Añade el soporte para ESP32:**
-    *   En *Archivo → Preferencias*, en "Gestor de URLs Adicionales de Tarjetas", añade:
-        `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
-    *   En *Herramientas → Placa → Gestor de Tarjetas*, busca `esp32` e instala la última versión (se requiere **v3.0.0 o superior**).
-3.  **Selecciona la placa:**
-    *   *Herramientas → Placa → esp32 → ESP32C3 Dev Module* (o la placa concreta que uses).
-4.  **Conecta y sube:**
-    *   Conecta el ESP32-C3 por USB y selecciona el puerto en *Herramientas → Puerto*.
-    *   Abre `Sumo_AndinoA.ino` y pulsa **Subir**.
-    *   Abre el Monitor Serie a **115200 baudios** para ver la actividad del robot.
+1. Instala el [Arduino IDE](https://www.arduino.cc/en/software).
+2. Añade el soporte ESP32:
+   * *Archivo → Preferencias* → "Gestor de URLs Adicionales de Tarjetas":
+     `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
+   * *Herramientas → Placa → Gestor de Tarjetas* → busca `esp32` e instala
+     **v3.0.0 o superior**.
+3. Instala la librería **NimBLE-Arduino** desde el Gestor de Librerías
+   (todo el firmware usa NimBLE).
+4. Selecciona la placa **ESP32C3 Dev Module**, abre `Sumo_AndinoA.ino` y pulsa **Subir**.
 
-### Con arduino-cli (build reproducible)
+### Opción 2 — arduino-cli (recomendada)
 
-Instala la dependencia BLE (una sola vez):
+Instala la dependencia (una sola vez):
 
 ```bash
-arduino-cli lib install NimBLE-Arduino   # todo el firmware usa NimBLE
+arduino-cli lib install NimBLE-Arduino
 ```
 
-Para fijar la versión exacta del core ESP32 (evita que un cambio futuro de la
-librería BLE rompa el build sin aviso):
+Compila y sube el firmware al ESP32-C3:
 
 ```bash
-arduino-cli core update-index
-arduino-cli core install esp32:esp32@3.3.10   # versión con la que se validó este proyecto
-arduino-cli compile --fqbn esp32:esp32:esp32c3 Sumo_AndinoA
-arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32c3 Sumo_AndinoA
+./bin/arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc -p /dev/ttyACM0 -u Sumo_AndinoA/
 ```
 
-O con el `Makefile` del repositorio: `make compile`, `make upload` (ajusta
-`CONFIG_FILE` si tu `arduino-cli.yaml` está en otra ruta).
+Abre el monitor serie a 115200 baudios para ver la actividad del robot:
+
+```bash
+./bin/arduino-cli monitor -p /dev/ttyACM0 --config baudrate=115200
+```
 
 ### Pruebas nativas (sin hardware)
 
-`GamepadParser` y `GamepadMixer` son funciones puras y se prueban en el host
-antes de tocar el robot:
+`GamepadParser` y `GamepadMixer` son funciones puras y se prueban en el
+ordenador antes de tocar el robot:
 
 ```bash
 make test
 ```
 
-Ejecuta los 10 casos del contrato (sticks centrados, avance/retroceso 100 %,
-giros sobre el sitio, avance + giro, deadzone, clamping y rechazo de reports
-inválidos) y debe terminar con `ALL TESTS PASSED`.
+Ejecuta **13 casos** (centro, avance, retroceso, giros, deadzone, reportes de
+15/16/17 bytes, botones y mezcla) y debe terminar con `ALL TESTS PASSED`.
+
+---
+
+## Parámetros configurables
+
+| Parámetro | Ubicación | Valor por defecto |
+| :--- | :--- | :--- |
+| Nombre BLE del robot | `Sumo_AndinoA.ino` → `BleManager bluetooth(...)` | `Robotini16` |
+| Watchdog del teléfono | `Sumo_AndinoA.ino` → `COMMAND_TIMEOUT_MS` | 450 ms |
+| Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox Wireless Controller"` |
+| Timeout de reports del mando | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
+| Timeout de conexión BLE | `GamepadController.h` → `GAMEPAD_CONNECT_TIMEOUT_MS` | 2000 ms |
+| Deadzone de los sticks | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
+| Debug del mando (Serial) | `Sumo_AndinoA.ino` → `GAMEPAD_DEBUG` | 0 (apagado) |
+| Dump de reports HID | `GamepadController.h` → `DEBUG_GAMEPAD_REPORTS` | 0 (apagado) |
+
+Con `GAMEPAD_DEBUG = 1` el monitor serie muestra el estado decodificado del
+mando, útil para verificar el parser y la mezcla:
+
+```text
+[PAD] RAW LY=0 RX=65535 | NLY=1000 NRX=1000 | L=700 R=-700
+```
 
 ---
 
 ## Licencia
 
-Este proyecto es de código abierto y se distribuye bajo la **Apache License 2.0**. Puedes usarlo, estudiarlo, modificarlo y compartirlo libremente en proyectos escolares, personales o de competición.
+Proyecto de código abierto distribuido bajo la **Apache License 2.0**. Puedes
+usarlo, estudiarlo, modificarlo y compartirlo libremente en proyectos escolares,
+personales o de competición.
 
 ---
 

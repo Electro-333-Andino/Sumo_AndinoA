@@ -35,7 +35,6 @@ public:
 
     // Copia el último comando a buffer (thread-safe). Retorna false si no hay nada nuevo.
     bool getCommand(char* buffer, size_t bufferSize);
-    bool hasNewCommand();
 
     // Milisegundos transcurridos desde el último comando recibido (para watchdog)
     unsigned long millisSinceLastCommand();

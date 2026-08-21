@@ -53,10 +53,6 @@ void MotorController::disableDriver() {
   digitalWrite(pinStby, LOW);
 }
 
-bool MotorController::isDriverEnabled() {
-  return digitalRead(pinStby) == HIGH;
-}
-
 void MotorController::emergencyStop() {
   stop();
   disableDriver(); // El TB6612 entero queda en alta impedancia, no solo PWM en 0

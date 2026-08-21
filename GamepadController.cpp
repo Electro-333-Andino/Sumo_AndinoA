@@ -398,10 +398,6 @@ bool GamepadController::isConnected() {
     return connected;
 }
 
-unsigned long GamepadController::millisSinceLastReport() {
-    return millis() - lastReportMillis;
-}
-
 GamepadState GamepadController::getState() {
     GamepadState s = state; // solo se modifica desde loop(): sin mux
     s.connected = connected;

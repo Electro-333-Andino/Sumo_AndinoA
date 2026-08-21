@@ -24,7 +24,6 @@
 #include <Esp.h>
 
 #include <cstdio>
-#include <nvs_flash.h>
 
 // --- MODOS DE OPERACIÓN (persistidos en NVS) ---
 #define MODE_APP  0 // teléfono Android (servidor BLE)
@@ -38,7 +37,6 @@
 // Es el ÚNICO mecanismo para cambiar de modo.
 #define PIN_BOOT         9
 #define BOOT_HOLD_MS     3000 // mantener 3 s para invertir el modo
-#define BOOT_DEBOUNCE_MS 30   // anti-rebote mínimo
 
 // --- CONFIGURACIÓN DE PINES ---
 #define PIN_LED  8
@@ -261,7 +259,7 @@ void loopAppMode() {
   statusLed.setConnected(bluetooth.isConnected());
   statusLed.update();
 
-  safety.check(); // watchdog del teléfono (1.5 s)
+  safety.check(); // watchdog del teléfono (450 ms sin comandos)
 
   char packet[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(packet, sizeof(packet))) {
@@ -281,26 +279,9 @@ void loopXboxMode() {
   }
 }
 
-// Borra TODA la partición NVS (emparejamientos BLE y opMode).
-// OJO: al descomentar también se resetea el modo a APP (default) en el próximo arranque.
-void clearBleBonds() {
-        Serial.println("[BLE] Limpiando memoria NVS de emparejamientos...");
-        // Inicializa o borra la partición NVS completa
-        esp_err_t err = nvs_flash_erase();
-        if (err == ESP_OK) {
-            nvs_flash_init();
-            Serial.println("[BLE] Memoria NVS limpiada con éxito.");
-        } else {
-            Serial.printf("[BLE] Error al borrar NVS: %d\n", err);
-        }
-    }
-
 // --- SETUP / LOOP ---
 
 void setup() {
-    //clearBleBonds();
-
-
     Serial.begin(115200);
 
     // 1. Leer el modo persistido en NVS (namespace "Andino_Sumo"); por defecto Modo App

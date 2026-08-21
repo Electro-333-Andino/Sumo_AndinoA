@@ -90,7 +90,6 @@ public:
     void update();
 
     bool isConnected();
-    unsigned long millisSinceLastReport();
     GamepadState getState();
 
     void setStopCallback(GamepadStopCallback cb);

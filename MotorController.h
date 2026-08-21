@@ -44,7 +44,6 @@ public:
     // Habilitar/deshabilitar el driver TB6612 a nivel de hardware
     void enableDriver();
     void disableDriver();
-    bool isDriverEnabled();
 
     // Métodos de movimiento con control independiente de velocidad (0 - 1023)
     // Los valores recibidos se aplican tal cual al PWM (0 - 1023).

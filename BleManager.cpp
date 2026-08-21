@@ -128,10 +128,6 @@ bool BleManager::isConnected() {
     return connected;
 }
 
-bool BleManager::hasNewCommand() {
-    return commandReady;
-}
-
 bool BleManager::getCommand(char* buffer, size_t bufferSize) {
     portENTER_CRITICAL(&mux);
     bool tenemosComando = commandReady;
