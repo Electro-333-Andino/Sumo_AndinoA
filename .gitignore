@@ -1,1 +1,9 @@
+# Archivo de contexto del proyecto (no se versiona)
 context.md
+
+# Datos generados por arduino-cli (toolchain, índices, cachés y temporales).
+# Ocupan cientos de MB y rompen el commit si se añaden con `git add .`
+arduino_data/
+
+# Binario compilado de las pruebas nativas (se regenera con `make test`)
+tests/test_gamepad
