@@ -18,9 +18,7 @@
 #define BLE_MANAGER_H
 
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
+#include <NimBLEDevice.h>
 
 // Tamaño máximo de un paquete de comando (sobra para "F,1023,1023" o "T,LF,0.91")
 #define BLE_CMD_BUFFER_SIZE 32
@@ -45,7 +43,7 @@ public:
     // Se ejecuta inmediatamente cuando el BLE se desconecta (ideal para robot.stop())
     void setSafetyStopCallback(SafetyStopCallback cb);
 
-    // Usados internamente por los callbacks de BLEServer/BLECharacteristic
+    // Usados internamente por los callbacks de NimBLEServer/NimBLECharacteristic
     void setConnectionState(bool state);
     void setReceivedCommand(const char* cmd, size_t len);
 

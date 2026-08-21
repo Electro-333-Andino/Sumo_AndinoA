@@ -28,7 +28,7 @@ El código está organizado en módulos pequeños y documentados, pensado para q
 *   **Selección de modo con el botón BOOT (fail-safe físico)**
     *   El único mecanismo para cambiar de modo es el botón interno **BOOT** (GPIO 9):
         mantenerlo presionado 3 segundos invierte el modo y reinicia.
-    *   El modo activo se guarda en NVS (Preferences, namespace `sumo`) y el LED
+    *   El modo activo se guarda en NVS (Preferences, namespace `Andino_Sumo`) y el LED
         indica el modo al arrancar (1 parpadeo lento = App, 2 rápidos = Xbox).
 *   **Seguridad integrada (anti-escape)**
     *   Parada inmediata de los motores ante cualquier desconexión.
@@ -63,12 +63,12 @@ Conecta el **ESP32-C3** al **TB6612FNG** según la siguiente tabla:
 | Pin ESP32 | Etiqueta en código | Función en el TB6612FNG | Descripción |
 | :---: | :--- | :--- | :--- |
 | **8** | `PIN_LED` | — | LED de estado (conexión) |
-| **0** | `PIN_ENA` | **PWMA** | Velocidad del motor izquierdo (PWM) |
-| **1** | `PIN_IN1` | **AIN1** | Sentido de giro del motor izquierdo |
-| **3** | `PIN_IN2` | **AIN2** | Sentido de giro del motor izquierdo |
-| **4** | `PIN_ENB` | **PWMB** | Velocidad del motor derecho (PWM) |
-| **5** | `PIN_IN3` | **BIN1** | Sentido de giro del motor derecho |
-| **6** | `PIN_IN4` | **BIN2** | Sentido de giro del motor derecho |
+| **5** | `PIN_ENA` | **PWMA** | Velocidad del motor izquierdo (PWM) |
+| **6** | `PIN_IN1` | **AIN1** | Sentido de giro del motor izquierdo |
+| **20** | `PIN_IN2` | **AIN2** | Sentido de giro del motor izquierdo |
+| **0** | `PIN_ENB` | **PWMB** | Velocidad del motor derecho (PWM) |
+| **1** | `PIN_IN3` | **BIN1** | Sentido de giro del motor derecho |
+| **4** | `PIN_IN4` | **BIN2** | Sentido de giro del motor derecho |
 | **7** | `PIN_STBY` | **STBY** | Habilitación general del driver (standby) |
 
 El PWM se configura a **5 kHz con resolución de 10 bits**, por lo que las velocidades se expresan en el rango **0 – 1023**.
@@ -77,7 +77,7 @@ El PWM se configura a **5 kHz con resolución de 10 bits**, por lo que las veloc
 
 ## Control desde el teléfono (protocolo BLE)
 
-El robot se anuncia como **`SumoAndinoA`** (nombre configurable en `Sumo_AndinoA.ino`). La aplicación envía cadenas de texto por la característica de escritura del servicio BLE:
+El robot se anuncia como **`Andino_Sumo`** (nombre configurable en `Sumo_AndinoA.ino`). La aplicación envía cadenas de texto por la característica de escritura del servicio BLE:
 
 | UUID | Descripción |
 | :--- | :--- |
@@ -178,7 +178,8 @@ Los resultados se limitan al rango `±configuredSpeed`. Esto permite avance con 
 
 | Parámetro | Ubicación | Valor por defecto |
 | :--- | :--- | :--- |
-| Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox"` (vacío = cualquier dispositivo HID) |
+| Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox Wireless Controller"` (vacío = cualquier dispositivo) |
+| Validación de fabricante | `GamepadController.h` → `GAMEPAD_VALIDATE_MANUFACTURER` | 1 (exige Microsoft 0x0006) |
 | Formato del HID report | `GamepadParser.cpp` (offsets, centro, rango y polaridad) | Xbox 1708, ejes u16 LE, 15/16 bytes |
 | Deadzone | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
 | Timeout de seguridad | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
@@ -199,6 +200,13 @@ Con `DEBUG_GAMEPAD_REPORTS = 1` se vuelca además la longitud, los bytes en hex 
 [GAMEPAD] LX=32768 LY=32768 RX=32768 RY=32768
 [GAMEPAD] normalized LX=0 LY=0 RX=0 RY=0
 ```
+
+> **Pila BLE:** todo el proyecto usa **NimBLE-Arduino** (v2.x, dependencia
+externa instalada con `arduino-cli lib install NimBLE-Arduino`), el mismo stack
+que usa la implementación de referencia del Xbox 1708 (BLE-Gamepad-Client).
+El servidor de la app (`BleManager`) y el cliente del mando
+(`GamepadController`) comparten el stack NimBLE, con menor consumo de heap
+que Bluedroid.
 
 ---
 
@@ -263,6 +271,12 @@ el ESP32 se vinculan solos al conectar, sin interacción del usuario.
     *   Abre el Monitor Serie a **115200 baudios** para ver la actividad del robot.
 
 ### Con arduino-cli (build reproducible)
+
+Instala la dependencia BLE (una sola vez):
+
+```bash
+arduino-cli lib install NimBLE-Arduino   # todo el firmware usa NimBLE
+```
 
 Para fijar la versión exacta del core ESP32 (evita que un cambio futuro de la
 librería BLE rompa el build sin aviso):

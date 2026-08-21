@@ -15,65 +15,103 @@
  */
 
 #include "GamepadController.h"
-#include <BLESecurity.h>
 #include <string.h>
-#include <map>
 
 static GamepadController* instance = nullptr;
 
-// Duración de cada ciclo de escaneo (async, no bloquea loop())
-static constexpr uint8_t GAMEPAD_SCAN_TIME_S = 2;
+// Duración de cada ciclo de escaneo en MILISEGUNDOS (async, no bloquea loop()).
+// IMPORTANTE: en NimBLE-Arduino 2.x, NimBLEScan::start(duration, ...) recibe
+// la duración en ms (no en segundos como en 1.x). Con un valor de 2 el
+// escaneo duraba solo 2 ms y jamás alcanzaba a recibir ninguna trama BLE.
+static constexpr uint32_t GAMEPAD_SCAN_TIME_MS = 3000;
 
 // Pausa entre intentos fallidos de escaneo/conexión
-static constexpr uint32_t GAMEPAD_RETRY_DELAY_MS = 3000;
+static constexpr uint32_t GAMEPAD_RETRY_DELAY_MS = 1000;
+
+// Company ID de Microsoft en el manufacturer data (primeros 2 bytes, LE)
+static constexpr uint8_t MICROSOFT_COMPANY_ID_LOW  = 0x06;
+static constexpr uint8_t MICROSOFT_COMPANY_ID_HIGH = 0x00;
 
 // ---------------------------------------------------------------------------
+// Callbacks BLE.
+//
+// IMPORTANTE: se instancian UNA SOLA VEZ como objetos estáticos (y el de
+// report como función libre) y se reutilizan en cada reconexión. No usar
+// `new` aquí: cada reconexión del mando en una jornada de competencia
+// acumularía heap hasta agotarlo.
+// ---------------------------------------------------------------------------
+
+// Comprueba que el manufacturer data del adv packet pertenezca a Microsoft.
+static bool isMicrosoftDevice(const NimBLEAdvertisedDevice& device) {
+    if (!device.haveManufacturerData()) return false;
+    std::string md = device.getManufacturerData();
+    if (md.length() < 2) return false;
+    return (uint8_t)md[0] == MICROSOFT_COMPANY_ID_LOW &&
+           (uint8_t)md[1] == MICROSOFT_COMPANY_ID_HIGH;
+}
 
 // Se ejecutan en la tarea del stack BLE; solo marcan flags (thread-safe).
-class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
-    void onResult(BLEAdvertisedDevice advertisedDevice) override {
-        if (instance == nullptr) return;
+class ScanCallbacks : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
+        if (instance == nullptr || advertisedDevice == nullptr) return;
 
-        // Filtro 1: debe anunciar el servicio HID estándar
-        if (!advertisedDevice.isAdvertisingService(BLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID))) {
-            return;
+        // Diagnóstico: registra (throttled) todo lo que el ESP32 ve, para
+        // saber si el mando se está anunciando y con qué nombre.
+        instance->noteScanResult(advertisedDevice);
+
+        // VÍA PRINCIPAL: nombre del mando (GAMEPAD_NAME_FILTER,
+        // "Xbox Wireless Controller"). El nombre puede viajar en el scan
+        // response (por eso el escaneo es activo), no solo en el adv packet.
+        // El servicio HID (0x1812) NO se exige aquí: se valida después de
+        // conectar (getService en connectToPad()), que es donde el 1708
+        // realmente lo expone.
+        std::string name;
+        if (advertisedDevice->haveName()) {
+            name = advertisedDevice->getName();
+        }
+        bool nameMatches = GAMEPAD_NAME_FILTER[0] != '\0' &&
+                           !name.empty() &&
+                           name.find(GAMEPAD_NAME_FILTER) != std::string::npos;
+
+        // VÍAS ALTERNATIVAS para variantes del 1708 que anuncian poco en el
+        // ADV_IND (nombre y manufacturer data suelen viajar en el SCAN_RSP):
+        // - fabricante Microsoft (0x0006), o
+        // - dispositivo sin nombre propio: se acepta como candidato y se
+        //   valida después de conectar con el servicio HID (0x1812).
+#if GAMEPAD_VALIDATE_MANUFACTURER
+        bool microsoftVendor = isMicrosoftDevice(*advertisedDevice);
+#else
+        bool microsoftVendor = false;
+#endif
+
+        if (!nameMatches) {
+            if (!microsoftVendor && !name.empty()) return;
         }
 
-        // Filtro 2 (opcional): subcadena del nombre del mando
-        String name;
-        if (advertisedDevice.haveName()) {
-            name = advertisedDevice.getName();
-        }
-        if (GAMEPAD_NAME_FILTER[0] != '\0') {
-            if (name.length() == 0) return;                       // sin nombre: no es el objetivo
-            if (name.indexOf(GAMEPAD_NAME_FILTER) < 0) return;    // nombre no coincide
-        }
+        NimBLEDevice::getScan()->stop(); // detiene el escaneo al encontrarlo
+        instance->rememberFoundDevice(advertisedDevice->getAddress());
+    }
 
-        advertisedDevice.getScan()->stop(); // detiene el escaneo al encontrarlo
-        instance->rememberFoundDevice(advertisedDevice.getAddress());
+    void onScanEnd(const NimBLEScanResults& scanResults, int reason) override {
+        if (instance != nullptr) instance->scanStopped();
     }
 };
 
 static ScanCallbacks scanCallbacks;
 
-// Callback de fin de escaneo (API del core 3.x: función, no método virtual)
-static void onScanComplete(BLEScanResults results) {
-    if (instance != nullptr) instance->scanStopped();
-}
-
-class ClientCallbacks : public BLEClientCallbacks {
-    void onConnect(BLEClient* pClient) override {
+class ClientCallbacks : public NimBLEClientCallbacks {
+    void onConnect(NimBLEClient* pClient) override {
         // nada: el éxito se comprueba en connectToPad()
     }
-    void onDisconnect(BLEClient* pClient) override {
+    void onDisconnect(NimBLEClient* pClient, int reason) override {
         if (instance != nullptr) instance->clientDisconnected();
     }
 };
 
 static ClientCallbacks clientCallbacks;
 
-// Callback de notifications del HID Report (notify_callback del core 3.x)
-static void onReportNotify(BLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+// Callback de notifications del HID Report (notify_callback de NimBLE)
+static void onReportNotify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (instance != nullptr) instance->storeReport(pData, length);
 }
 
@@ -82,30 +120,29 @@ static void onReportNotify(BLERemoteCharacteristic* pChar, uint8_t* pData, size_
 GamepadController::GamepadController()
     : scan(nullptr), client(nullptr), haveAddress(false),
       phase(Phase::SCANNING), foundDevice(false), scanFinished(false),
+      devicesSeen(0),
       linkLost(false), connected(false), lastReportMillis(0),
-      reportReady(false), reportLen(0), stopCb(nullptr), phaseEnteredAt(0) {
+      reportReady(false), reportLen(0), stopCb(nullptr), phaseEnteredAt(0),
+      firstValidReport(false) {
     memset(&state, 0, sizeof(state));
     instance = this;
 }
 
 void GamepadController::begin() {
-    // Inicializa el stack BLE si aún no está activo. BLEDevice::init() es
-    // idempotente (usa un flag interno), así que es seguro llamarlo aunque el
-    // servidor de la app ya lo haya inicializado: esto hace que el Modo Xbox
-    // sea autónomo. Sin esta llamada, el stack quedaría sin inicializar y
-    // BLEDevice::getScan()/createClient() provocarían un Load access fault.
-    BLEDevice::init("SumoAndinoA");
+    Serial.println("[GAMEPAD] Initializing NimBLE...");
 
-    // --- CONFIGURACIÓN DE SEGURIDAD OBLIGATORIA PARA XBOX (HID over GATT) ---
+    // Inicializa el stack BLE si aún no está activo. NimBLEDevice::init() es
+    // idempotente (usa un flag interno), así que es seguro llamarlo aunque el
+    // servidor de la app ya lo haya inicializado: cada modo es autónomo.
+    NimBLEDevice::init("Andino_Sumo");
+
+    // --- SEGURIDAD OBLIGATORIA PARA XBOX (HID over GATT) ---
     // El perfil HID exige conexión encriptada y vinculada (bonding): sin esto,
     // el mando rechaza la suscripción al Report con "autenticación insuficiente"
     // o corta la conexión. Secure Connections + Bonding, sin MITM (Just Works).
-    BLESecurity* pSecurity = new BLESecurity();
-    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND); // SC + bonding
-    pSecurity->setCapability(ESP_IO_CAP_NONE);                 // sin pantalla ni teclado
-    pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    NimBLEDevice::setSecurityAuth(true, false, true); // bonding + SC, sin MITM
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
 
-    Serial.println("[GAMEPAD] Scanning...");
     phase = Phase::SCANNING;
     phaseEnteredAt = millis();
     startScan();
@@ -113,12 +150,32 @@ void GamepadController::begin() {
 
 void GamepadController::startScan() {
     if (scan == nullptr) {
-        scan = BLEDevice::getScan();
-        scan->setAdvertisedDeviceCallbacks(&scanCallbacks);
-        scan->setActiveScan(true); // escaneo activo: obtenemos el nombre
+        scan = NimBLEDevice::getScan();
+        scan->setScanCallbacks(&scanCallbacks);
+        // Parámetros explícitos del escaneo. PASIVO obligatorio en este
+        // ESP32-C3 + NimBLE: con escaneo activo (SCAN_REQ) el radio no recibe
+        // ninguna trama (0 devices); pasivo sí recibe. El Xbox 1708 anuncia
+        // nombre/fabricante en el SCAN_RSP, que no llega en pasivo: por eso el
+        // filtro acepta candidatos sin nombre y se valida después de conectar
+        // con el servicio HID (0x1812).
+        scan->setActiveScan(false);       // pasivo: sin SCAN_REQ
+        scan->setInterval(100);           // 100 ms entre ventanas
+        scan->setWindow(100);             // ventana continua (máxima captura)
+        scan->setDuplicateFilter(false);  // reporta todas las tramas
     }
-    // Async: no bloquea loop(); al terminar se invoca onScanComplete.
-    scan->start(GAMEPAD_SCAN_TIME_S, onScanComplete);
+    devicesSeen = 0;
+    Serial.println("[GAMEPAD] Scanning...");
+
+    // IMPORTANTE: scanCompleteCB = true. Con `false`, NimBLE NO invoca
+    // onScanEnd al terminar el periodo: scanFinished nunca se activa y la
+    // máquina de estados queda atascada en SCANNING para siempre (solo
+    // escanea una vez al arrancar y jamás reintenta ni conecta).
+    // Async: no bloquea loop(); al terminar se invoca onScanEnd.
+    if (!scan->start(GAMEPAD_SCAN_TIME_MS, true)) {
+        Serial.println("[GAMEPAD] ERROR: scan->start() failed - retry in 3 s");
+        phase = Phase::RETRY_WAIT;
+        phaseEnteredAt = millis();
+    }
 }
 
 void GamepadController::update() {
@@ -147,9 +204,22 @@ void GamepadController::update() {
             } else {
                 // No se encontró el mando: reintentar tras una pausa
                 phase = Phase::RETRY_WAIT;
+                Serial.printf("[GAMEPAD] Scan finished (%u devices) - retry in %u s\n",
+                              (unsigned)devicesSeen,
+                              (unsigned)(GAMEPAD_RETRY_DELAY_MS / 1000));
             }
             phaseEnteredAt = millis();
         }
+    }
+
+    // Fallback de robustez: si el mando se encontró pero onScanEnd no llegó
+    // (p. ej. porque se llamó scan->stop() dentro del propio callback), se
+    // pasa igualmente a CONNECTING.
+    if (foundDevice && phase == Phase::SCANNING) {
+        foundDevice = false;
+        phase = Phase::CONNECTING;
+        phaseEnteredAt = millis();
+        Serial.println("[GAMEPAD] Controller found - connecting");
     }
 
     // --- Procesar el último report recibido ---
@@ -182,6 +252,11 @@ void GamepadController::update() {
             lastReportMillis = millis();
             state.connected = true; // estado nuevo listo para getState()
 
+            if (!firstValidReport) {
+                firstValidReport = true;
+                Serial.println("[GAMEPAD] First valid report received");
+            }
+
 #if DEBUG_GAMEPAD_REPORTS
             Serial.printf("[GAMEPAD] LX=%u LY=%u RX=%u RY=%u\n",
                           state.rawLeftX, state.rawLeftY,
@@ -196,7 +271,7 @@ void GamepadController::update() {
     // --- Máquina de estados ---
     switch (phase) {
         case Phase::SCANNING:
-            // escaneo async en curso; onScanComplete decidirá el siguiente paso
+            // escaneo async en curso; onScanEnd decidirá el siguiente paso
             break;
 
         case Phase::CONNECTING:
@@ -242,17 +317,17 @@ void GamepadController::connectToPad() {
     Serial.println("[GAMEPAD] Connecting...");
 
     // El cliente se crea una sola vez y se reutiliza en cada reconexión:
-    // evita fugas de heap y es la forma correcta con la API del core 3.x
-    // (no existe BLEDevice::deleteClient()).
+    // evita fugas de heap.
     if (client == nullptr) {
-        client = BLEDevice::createClient();
-        client->setClientCallbacks(&clientCallbacks);
+        client = NimBLEDevice::createClient();
+        client->setClientCallbacks(&clientCallbacks, false); // estáticos: no borrar
+        client->setConnectTimeout(GAMEPAD_CONNECT_TIMEOUT_MS);
     } else if (client->isConnected()) {
         client->disconnect();
     }
 
-    // connect() es bloqueante; el timeout en ms limita la espera.
-    if (!client->connect(padAddress, 0xFF, GAMEPAD_CONNECT_TIMEOUT_MS)) {
+    // connect() es bloqueante; el timeout (setConnectTimeout) limita la espera.
+    if (!client->connect(padAddress)) {
         Serial.println("[GAMEPAD] Connect failed");
         client->disconnect();
         phase = Phase::RETRY_WAIT;
@@ -261,8 +336,17 @@ void GamepadController::connectToPad() {
     }
     Serial.println("[GAMEPAD] Connected");
 
-    // Descubrir el servicio HID
-    BLERemoteService* hidService = client->getService(BLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
+    // El Xbox 1708 exige encriptación/bonding para HID over GATT: sin esto
+    // rechaza la suscripción al Report (0x2A4D). secureConnection() inicia el
+    // pairing Just Works si no hay claves guardadas, o restaura el bond.
+    if (client->secureConnection()) {
+        Serial.println("[GAMEPAD] Link secured (pairing OK)");
+    } else {
+        Serial.println("[GAMEPAD] Warning: link not secured, subscription may fail");
+    }
+
+    // Descubrir el servicio HID (el descubrimiento GATT es automático en NimBLE)
+    NimBLERemoteService* hidService = client->getService(NimBLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
     if (hidService == nullptr) {
         Serial.println("[GAMEPAD] HID service not found");
         client->disconnect();
@@ -278,16 +362,13 @@ void GamepadController::connectToPad() {
     // salida (vibración) o de feature puede provocar que el mando cierre la
     // conexión, por eso se filtra con canNotify() antes de suscribirse.
     bool subscribed = false;
-    std::map<std::string, BLERemoteCharacteristic*>* chars = hidService->getCharacteristics();
-    if (chars != nullptr) {
-        for (auto& pair : *chars) {
-            BLERemoteCharacteristic* ch = pair.second;
-            if (ch->getUUID().equals(BLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID)) && ch->canNotify()) {
-                Serial.println("[GAMEPAD] Report characteristic found");
-                if (ch->subscribe(true, onReportNotify)) {
-                    subscribed = true;
-                    Serial.println("[GAMEPAD] Notification enabled");
-                }
+    const std::vector<NimBLERemoteCharacteristic*>& chars = hidService->getCharacteristics();
+    for (NimBLERemoteCharacteristic* ch : chars) {
+        if (ch->getUUID() == NimBLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID) && ch->canNotify()) {
+            Serial.println("[GAMEPAD] Report characteristic found");
+            if (ch->subscribe(true, onReportNotify)) {
+                subscribed = true;
+                Serial.println("[GAMEPAD] Notification enabled");
             }
         }
     }
@@ -299,10 +380,10 @@ void GamepadController::connectToPad() {
         phaseEnteredAt = millis();
         return;
     }
-    Serial.println("[GAMEPAD] Report subscribed");
 
     connected = true;
     lastReportMillis = millis();
+    firstValidReport = false; // aún no hay un reporte válido de esta conexión
     phase = Phase::CONNECTED;
     phaseEnteredAt = millis();
 }
@@ -333,7 +414,30 @@ void GamepadController::setStopCallback(GamepadStopCallback cb) {
 
 // --- Entradas desde los callbacks BLE (tarea del stack) ---
 
-void GamepadController::rememberFoundDevice(const BLEAddress& addr) {
+// Diagnóstico del escaneo: cuenta dispositivos vistos y registra con throttle
+// el nombre, fabricante y RSSI, para verificar qué anuncia el entorno.
+void GamepadController::noteScanResult(const NimBLEAdvertisedDevice* device) {
+    if (device == nullptr) return;
+    devicesSeen++;
+
+    static unsigned long lastLog = 0;
+    unsigned long now = millis();
+    if (now - lastLog < 300) return; // máximo ~3 líneas/s
+    lastLog = now;
+
+    Serial.printf("[GAMEPAD] Seen (%u): ", (unsigned)devicesSeen);
+    if (device->haveName()) {
+        Serial.printf("'%s' ", device->getName().c_str());
+    } else {
+        Serial.print("(sin nombre) ");
+    }
+    Serial.printf("addr=%s MS=%u rssi=%d\n",
+                  device->getAddress().toString().c_str(),
+                  (unsigned)isMicrosoftDevice(*device),
+                  device->getRSSI());
+}
+
+void GamepadController::rememberFoundDevice(const NimBLEAddress& addr) {
     Serial.println("[GAMEPAD] Found controller");
     padAddress = addr;
     haveAddress = true;

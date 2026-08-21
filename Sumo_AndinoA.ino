@@ -54,7 +54,7 @@
 #define PIN_STBY 7
 
 // Watchdog del teléfono: si no llega un comando en este tiempo, parada preventiva
-#define COMMAND_TIMEOUT_MS 1500
+#define COMMAND_TIMEOUT_MS 450
 
 // --- VELOCIDADES POR DEFECTO (0 a 1023) ---
 uint16_t DEFAULT_SPEED_LEFT  = 1023;
@@ -63,13 +63,13 @@ uint16_t DEFAULT_TURN_SPEED  = 1023;
 
 // DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZADO/SALIDA por Serial; 0 = silencio
 #ifndef GAMEPAD_DEBUG
-#define GAMEPAD_DEBUG 1
+#define GAMEPAD_DEBUG 0
 #endif
 
 // --- INSTANCIACIÓN ---
 StatusLed statusLed(PIN_LED);
 MotorController robot(PIN_ENA, PIN_IN1, PIN_IN2, PIN_ENB, PIN_IN3, PIN_IN4, PIN_STBY);
-BleManager bluetooth("Andino_Sumo");
+BleManager bluetooth("Robotini16");
 SafetyManager safety(robot, bluetooth, COMMAND_TIMEOUT_MS);
 GamepadController gamepad;
 GamepadMixer mixer;
@@ -78,7 +78,7 @@ GamepadMixer mixer;
 // de movimiento (p. ej. "F,700,700" -> 700). Por defecto: 1023.
 uint16_t configuredSpeed = 1023;
 
-// Modo activo, persistido en NVS (namespace "sumo", clave "opMode")
+// Modo activo, persistido en NVS (namespace "Andino_Sumo", clave "opMode")
 uint8_t opMode = MODE_APP;
 
 // --- CAMBIO DE MODO ---
@@ -243,15 +243,16 @@ void blinkModeLed() {
 // --- INICIALIZACIÓN EXCLUSIVA POR MODO ---
 
 void setupAppMode() {
+  Serial.println("Modo: APP (BLE Android)");
   bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
-  Serial.println("Modo: APP (BLE Android)");
 }
 
 void setupXboxMode() {
+  Serial.println("Modo: XBOX (BLE HID) - mando Xbox Wireless Controller 1708");
+  Serial.println("Para volver al Modo App: mantener BOOT 3 segundos.");
   gamepad.setStopCallback(gamepadStop);
   gamepad.begin(); // inicializa el stack BLE de forma autónoma (idempotente)
-  Serial.println("Modo: XBOX (BLE HID)");
 }
 
 // --- BUCLES EXCLUSIVOS POR MODO ---
@@ -280,7 +281,8 @@ void loopXboxMode() {
   }
 }
 
-//Borrar la NVS
+// Borra TODA la partición NVS (emparejamientos BLE y opMode).
+// OJO: al descomentar también se resetea el modo a APP (default) en el próximo arranque.
 void clearBleBonds() {
         Serial.println("[BLE] Limpiando memoria NVS de emparejamientos...");
         // Inicializa o borra la partición NVS completa
@@ -301,7 +303,7 @@ void setup() {
 
     Serial.begin(115200);
 
-    // 1. Leer el modo persistido en NVS (namespace "sumo"); por defecto Modo App
+    // 1. Leer el modo persistido en NVS (namespace "Andino_Sumo"); por defecto Modo App
     {
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, true);
@@ -312,11 +314,15 @@ void setup() {
     // 2. Feedback visual del modo de arranque
     blinkModeLed();
 
-    // 3. Inicialización común a ambos modos
+    // 3. Log del modo ANTES de tocar BLE (para saber siempre dónde arranca)
+    Serial.print("Modo persistido en NVS: ");
+    Serial.println(opMode == MODE_APP ? "APP (0)" : "XBOX (1)");
+
+    // 4. Inicialización común a ambos modos
     statusLed.begin();
     robot.begin();
 
-    // 4. Inicialización EXCLUSIVA: solo el stack BLE del modo activo
+    // 5. Inicialización EXCLUSIVA: solo el stack BLE del modo activo
     if (opMode == MODE_APP) {
         setupAppMode();
     } else {

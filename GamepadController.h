@@ -18,12 +18,7 @@
 #define GAMEPAD_CONTROLLER_H
 
 #include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEClient.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
-#include <BLEUtils.h>
-#include <BLEAddress.h>
+#include <NimBLEDevice.h>
 #include "GamepadParser.h"
 
 // Tiempo máximo sin recibir un report del mando antes de detener el robot.
@@ -33,10 +28,26 @@
 #define GAMEPAD_TIMEOUT_MS 200
 #endif
 
+// Timeout de cada intento de conexión en milisegundos (client->connect() es
+// bloqueante para loop()). En competencia conviene un valor corto: 2000 ms
+// evita perder el combate esperando una reconexión que no llega; subirlo a
+// 4000-5000 ms da más margen en entornos con mucha interferencia RF.
+#ifndef GAMEPAD_CONNECT_TIMEOUT_MS
+#define GAMEPAD_CONNECT_TIMEOUT_MS 2000
+#endif
+
 // Filtro de nombre del mando (subcadena). Vacío = aceptar cualquier
-// dispositivo que anuncie el servicio HID. Ajustar al mando real.
+// dispositivo. Por defecto busca el nombre real del Xbox 1708.
 #ifndef GAMEPAD_NAME_FILTER
-#define GAMEPAD_NAME_FILTER ""
+#define GAMEPAD_NAME_FILTER "Xbox Wireless Controller"
+#endif
+
+// Validación opcional del manufacturer data durante el escaneo:
+// 1 = habilitada: si el nombre no coincide, se acepta un dispositivo de
+//     Microsoft (0x0006) sin nombre anunciado (variante del 1708 que no
+//     anuncia nombre); 0 = solo validar por nombre.
+#ifndef GAMEPAD_VALIDATE_MANUFACTURER
+#define GAMEPAD_VALIDATE_MANUFACTURER 1
 #endif
 
 // Servicio HID estándar y su characteristic de Report
@@ -52,30 +63,25 @@
 #define DEBUG_GAMEPAD_REPORTS 0
 #endif
 
-// Timeout de cada intento de conexión en milisegundos (client->connect() es
-// bloqueante para loop()). En competencia conviene un valor corto: 2000 ms
-// evita perder el combate esperando una reconexión que no llega; subirlo a
-// 4000-5000 ms da más margen en entornos con mucha interferencia RF.
-#ifndef GAMEPAD_CONNECT_TIMEOUT_MS
-#define GAMEPAD_CONNECT_TIMEOUT_MS 2000
-#endif
-
 // Callback de seguridad: se invoca para detener el robot ante
 // desconexión del mando, timeout de reports o antes de un intento
 // de conexión (porque este es bloqueante y congela loop()).
 typedef void (*GamepadStopCallback)();
 
 // Cliente BLE (central) que busca el mando, se conecta, se suscribe al
-// HID Report y actualiza un GamepadState. Usa la misma API BLEDevice que
-// BleManager porque el ESP32-C3 no puede ejecutar Bluedroid y NimBLE a la
-// vez: el servidor Android (Bluedroid) y este cliente deben coexistir.
+// HID Report y actualiza un GamepadState.
+//
+// STACK BLE: NimBLE-Arduino (dependencia externa, la misma que usa la
+// implementación de referencia BLE-Gamepad-Client para el Xbox 1708). Todo el
+// proyecto usa NimBLE: el servidor de la app (BleManager) y este cliente
+// comparten el mismo stack, por lo que los modos App/Xbox son compatibles.
 class GamepadController {
 public:
     GamepadController();
 
-    // Inicializa el cliente BLE de forma autónoma: llama a BLEDevice::init()
-    // (idempotente) y no requiere que el servidor de la app se haya iniciado.
-    // Adecuado para la arquitectura de modos mutuamente excluyentes.
+    // Inicializa el cliente BLE de forma autónoma: llama a NimBLEDevice::init()
+    // (idempotente) y configura la seguridad requerida por el Xbox (Secure
+    // Connections + Bonding, Just Works).
     void begin();
 
     // Máquina de estados: escaneo -> conexión -> suscripción -> reports.
@@ -90,10 +96,12 @@ public:
     void setStopCallback(GamepadStopCallback cb);
 
     // --- Usados internamente por los callbacks BLE (tarea del stack) ---
-    void rememberFoundDevice(const BLEAddress& addr);
+    void rememberFoundDevice(const NimBLEAddress& addr);
     void scanStopped();
     void clientDisconnected();
     void storeReport(const uint8_t* data, size_t len);
+    // Diagnóstico del escaneo (invocado desde onResult, tarea BLE)
+    void noteScanResult(const NimBLEAdvertisedDevice* device);
 
 private:
     enum class Phase : uint8_t { SCANNING, CONNECTING, CONNECTED, RETRY_WAIT };
@@ -102,15 +110,16 @@ private:
     void connectToPad();
     void disconnectClient();
 
-    BLEScan* scan;
-    BLEClient* client;
+    NimBLEScan* scan;
+    NimBLEClient* client;
 
-    BLEAddress padAddress;      // mando objetivo encontrado
+    NimBLEAddress padAddress;   // mando objetivo encontrado
     bool haveAddress;
 
     Phase phase;
     volatile bool foundDevice;  // el escaneo encontró un mando válido
     volatile bool scanFinished; // el escaneo terminó (éxito o timeout)
+    volatile uint32_t devicesSeen; // dispositivos vistos en el último escaneo (diagnóstico)
     volatile bool linkLost;     // el enlace BLE se perdió
 
     volatile bool connected;
@@ -125,6 +134,7 @@ private:
 
     GamepadStopCallback stopCb;
     unsigned long phaseEnteredAt;
+    bool firstValidReport; // true tras el primer reporte válido de la conexión
 
     GamepadParser parser;
 };

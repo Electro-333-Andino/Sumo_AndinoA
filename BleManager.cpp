@@ -15,7 +15,6 @@
  */
 
 #include "BleManager.h"
-#include <BLE2902.h>
 #include <string.h>
 
 static BleManager* instance = nullptr;
@@ -28,30 +27,37 @@ static BleManager* instance = nullptr;
 #define RX_UUID       "5ED81982-1610-4A5D-979B-98E58EF12D31" // App -> ESP32
 #define TX_UUID       "D2904D82-9FBF-4BD1-86FB-84D2C89E40A0" // ESP32 -> App
 
-class ServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) override {
+// --- Callbacks del servidor NimBLE (objetos estáticos: sin fugas de heap) ---
+
+class ServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
         if (instance != nullptr) instance->setConnectionState(true);
     }
-    void onDisconnect(BLEServer* pServer) override {
+
+    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
         // setConnectionState(false) dispara el safety-stop callback de inmediato,
         // sin esperar al siguiente ciclo de loop().
         if (instance != nullptr) instance->setConnectionState(false);
-        BLEDevice::startAdvertising();
+        // Reanunciar el servicio para que la app pueda reconectar
+        NimBLEDevice::startAdvertising();
     }
 };
 
-class RxCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) override {
-        // Nota: en el core ESP32 Arduino 3.x, getValue() devuelve Arduino String
-        // (en versiones más viejas del core devolvía std::string). Aquí solo se
-        // usa de paso: se copia de inmediato a un buffer fijo en setReceivedCommand()
-        // y no se retiene, así que no acumula fragmentación de heap.
-        String rxValue = pCharacteristic->getValue();
-        if (rxValue.length() > 0 && instance != nullptr) {
+static ServerCallbacks serverCallbacks;
+
+class RxCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+        if (instance == nullptr) return;
+        // NimBLE entrega el valor como std::string; se copia de inmediato a un
+        // buffer fijo en setReceivedCommand() y no se retiene.
+        std::string rxValue = pCharacteristic->getValue<std::string>();
+        if (!rxValue.empty()) {
             instance->setReceivedCommand(rxValue.c_str(), rxValue.length());
         }
     }
 };
+
+static RxCallbacks rxCallbacks;
 
 BleManager::BleManager(const char* name)
     : deviceName(name), connected(false), commandReady(false),
@@ -62,34 +68,35 @@ BleManager::BleManager(const char* name)
 }
 
 void BleManager::begin() {
-    BLEDevice::init(deviceName);
-    BLEServer *pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new ServerCallbacks());
+    // init() es idempotente (flag interno): seguro aunque GamepadController ya
+    // haya inicializado el stack NimBLE.
+    NimBLEDevice::init(deviceName);
 
-    BLEService *pService = pServer->createService(SERVICE_UUID);
+    NimBLEServer* pServer = NimBLEDevice::createServer();
+    pServer->setCallbacks(&serverCallbacks, false); // callbacks estáticos: no borrar
 
-    BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
-                                             RX_UUID,
-                                             BLECharacteristic::PROPERTY_WRITE |
-                                             BLECharacteristic::PROPERTY_WRITE_NR
-                                           );
-    pRxCharacteristic->setCallbacks(new RxCallbacks());
+    NimBLEService* pService = pServer->createService(SERVICE_UUID);
 
-    BLECharacteristic *pTxCharacteristic = pService->createCharacteristic(
-                                             TX_UUID,
-                                             BLECharacteristic::PROPERTY_NOTIFY
-                                           );
-    pTxCharacteristic->addDescriptor(new BLE2902());
+    NimBLECharacteristic* pRxCharacteristic = pService->createCharacteristic(
+        RX_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    pRxCharacteristic->setCallbacks(&rxCallbacks);
+
+    NimBLECharacteristic* pTxCharacteristic = pService->createCharacteristic(
+        TX_UUID,
+        NIMBLE_PROPERTY::NOTIFY); // el descriptor CCCD (0x2902) se crea solo
 
     pService->start();
 
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    // Advertising con scan response. IMPORTANTE: en NimBLE el nombre del
+    // dispositivo NO se añade solo al advertising (en Bluedroid sí); hay que
+    // configurarlo explícitamente con setName() para que la app lo encuentre
+    // por nombre en el scan response.
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    pAdvertising->setName(deviceName);
     pAdvertising->addServiceUUID(SERVICE_UUID);
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06);
-    pAdvertising->setMinPreferred(0x12);
-
-    BLEDevice::startAdvertising();
+    pAdvertising->enableScanResponse(true);
+    NimBLEDevice::startAdvertising();
 }
 
 void BleManager::setConnectionState(bool state) {
