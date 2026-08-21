@@ -20,17 +20,11 @@
 static GamepadController* instance = nullptr;
 
 // Duración de cada ciclo de escaneo en MILISEGUNDOS (async, no bloquea loop()).
-// IMPORTANTE: en NimBLE-Arduino 2.x, NimBLEScan::start(duration, ...) recibe
-// la duración en ms (no en segundos como en 1.x). Con un valor de 2 el
-// escaneo duraba solo 2 ms y jamás alcanzaba a recibir ninguna trama BLE.
+// En NimBLE-Arduino 2.x, NimBLEScan::start(duration, ...) recibe ms.
 static constexpr uint32_t GAMEPAD_SCAN_TIME_MS = 3000;
 
 // Pausa entre intentos fallidos de escaneo/conexión
 static constexpr uint32_t GAMEPAD_RETRY_DELAY_MS = 1000;
-
-// Company ID de Microsoft en el manufacturer data (primeros 2 bytes, LE)
-static constexpr uint8_t MICROSOFT_COMPANY_ID_LOW  = 0x06;
-static constexpr uint8_t MICROSOFT_COMPANY_ID_HIGH = 0x00;
 
 // ---------------------------------------------------------------------------
 // Callbacks BLE.
@@ -41,55 +35,49 @@ static constexpr uint8_t MICROSOFT_COMPANY_ID_HIGH = 0x00;
 // acumularía heap hasta agotarlo.
 // ---------------------------------------------------------------------------
 
-// Comprueba que el manufacturer data del adv packet pertenezca a Microsoft.
-static bool isMicrosoftDevice(const NimBLEAdvertisedDevice& device) {
-    if (!device.haveManufacturerData()) return false;
-    std::string md = device.getManufacturerData();
-    if (md.length() < 2) return false;
-    return (uint8_t)md[0] == MICROSOFT_COMPANY_ID_LOW &&
-           (uint8_t)md[1] == MICROSOFT_COMPANY_ID_HIGH;
-}
-
 // Se ejecutan en la tarea del stack BLE; solo marcan flags (thread-safe).
 class ScanCallbacks : public NimBLEScanCallbacks {
     void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
         if (instance == nullptr || advertisedDevice == nullptr) return;
 
-        // Diagnóstico: registra (throttled) todo lo que el ESP32 ve, para
-        // saber si el mando se está anunciando y con qué nombre.
+        // Diagnóstico (solo detallado si GAMEPAD_DEBUG_SCAN == 1)
         instance->noteScanResult(advertisedDevice);
 
-        // VÍA PRINCIPAL: nombre del mando (GAMEPAD_NAME_FILTER,
-        // "Xbox Wireless Controller"). El nombre puede viajar en el scan
-        // response (por eso el escaneo es activo), no solo en el adv packet.
-        // El servicio HID (0x1812) NO se exige aquí: se valida después de
-        // conectar (getService en connectToPad()), que es donde el 1708
-        // realmente lo expone.
+        // IDENTIFICACIÓN ESTRICTA del Xbox 1708 (GamepadFilter):
+        //   Caso A: nombre "Xbox Wireless Controller".
+        //   Caso B (sin nombre): appearance HID + manufacturer Microsoft.
+        // Un dispositivo desconocido jamás se acepta ni detiene el escaneo.
         std::string name;
         if (advertisedDevice->haveName()) {
             name = advertisedDevice->getName();
         }
-        bool nameMatches = GAMEPAD_NAME_FILTER[0] != '\0' &&
-                           !name.empty() &&
-                           name.find(GAMEPAD_NAME_FILTER) != std::string::npos;
 
-        // VÍAS ALTERNATIVAS para variantes del 1708 que anuncian poco en el
-        // ADV_IND (nombre y manufacturer data suelen viajar en el SCAN_RSP):
-        // - fabricante Microsoft (0x0006), o
-        // - dispositivo sin nombre propio: se acepta como candidato y se
-        //   valida después de conectar con el servicio HID (0x1812).
-#if GAMEPAD_VALIDATE_MANUFACTURER
-        bool microsoftVendor = isMicrosoftDevice(*advertisedDevice);
-#else
-        bool microsoftVendor = false;
-#endif
-
-        if (!nameMatches) {
-            if (!microsoftVendor && !name.empty()) return;
+        bool hasManufacturerData = false;
+        uint16_t manufacturerId = 0;
+        if (advertisedDevice->haveManufacturerData()) {
+            std::string md = advertisedDevice->getManufacturerData();
+            if (md.length() >= 2) {
+                manufacturerId = (uint16_t)((uint8_t)md[0] | ((uint8_t)md[1] << 8));
+                hasManufacturerData = true;
+            }
         }
 
-        NimBLEDevice::getScan()->stop(); // detiene el escaneo al encontrarlo
-        instance->rememberFoundDevice(advertisedDevice->getAddress());
+        bool hasAppearance = advertisedDevice->haveAppearance();
+        uint16_t appearance = hasAppearance ? advertisedDevice->getAppearance() : 0;
+
+        GamepadFilter::MatchResult match = GamepadFilter::evaluate(
+            advertisedDevice->haveName(), name,
+            hasAppearance, appearance,
+            hasManufacturerData, manufacturerId);
+
+        if (match == GamepadFilter::MatchResult::NO_MATCH) {
+            return; // no es el mando: se sigue escaneando
+        }
+
+        // Mando objetivo identificado: se guarda su dirección y se detiene el
+        // escaneo. La conexión no se intenta con ningún otro dispositivo.
+        NimBLEDevice::getScan()->stop();
+        instance->rememberFoundDevice(advertisedDevice);
     }
 
     void onScanEnd(const NimBLEScanResults& scanResults, int reason) override {
@@ -110,7 +98,7 @@ class ClientCallbacks : public NimBLEClientCallbacks {
 
 static ClientCallbacks clientCallbacks;
 
-// Callback de notifications del HID Report (notify_callback de NimBLE)
+// Callback de notifications del HID Input Report (notify_callback de NimBLE)
 static void onReportNotify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (instance != nullptr) instance->storeReport(pData, length);
 }
@@ -120,10 +108,10 @@ static void onReportNotify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, si
 GamepadController::GamepadController()
     : scan(nullptr), client(nullptr), haveAddress(false),
       phase(Phase::SCANNING), foundDevice(false), scanFinished(false),
-      devicesSeen(0),
-      linkLost(false), connected(false), lastReportMillis(0),
-      reportReady(false), reportLen(0), stopCb(nullptr), phaseEnteredAt(0),
-      firstValidReport(false) {
+      devicesSeen(0), linkLost(false),
+      connected(false), notifyEnabled(false), connectedAt(0),
+      lastReportMillis(0), reportReady(false), reportLen(0),
+      stopCb(nullptr), phaseEnteredAt(0) {
     memset(&state, 0, sizeof(state));
     instance = this;
 }
@@ -131,16 +119,14 @@ GamepadController::GamepadController()
 void GamepadController::begin() {
     Serial.println("[GAMEPAD] Initializing NimBLE...");
 
-    // Inicializa el stack BLE si aún no está activo. NimBLEDevice::init() es
-    // idempotente (usa un flag interno), así que es seguro llamarlo aunque el
-    // servidor de la app ya lo haya inicializado: cada modo es autónomo.
+    // Inicializa el stack BLE si aún no está activo (idempotente).
     NimBLEDevice::init("Andino_Sumo");
 
     // --- SEGURIDAD OBLIGATORIA PARA XBOX (HID over GATT) ---
     // El perfil HID exige conexión encriptada y vinculada (bonding): sin esto,
-    // el mando rechaza la suscripción al Report con "autenticación insuficiente"
-    // o corta la conexión. Secure Connections + Bonding, sin MITM (Just Works).
-    NimBLEDevice::setSecurityAuth(true, false, true); // bonding + SC, sin MITM
+    // el mando rechaza la suscripción al Input Report o corta la conexión.
+    // Secure Connections + Bonding, sin MITM (Just Works).
+    NimBLEDevice::setSecurityAuth(true, false, true);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
 
     phase = Phase::SCANNING;
@@ -152,27 +138,24 @@ void GamepadController::startScan() {
     if (scan == nullptr) {
         scan = NimBLEDevice::getScan();
         scan->setScanCallbacks(&scanCallbacks);
-        // Parámetros explícitos del escaneo. PASIVO obligatorio en este
-        // ESP32-C3 + NimBLE: con escaneo activo (SCAN_REQ) el radio no recibe
-        // ninguna trama (0 devices); pasivo sí recibe. El Xbox 1708 anuncia
-        // nombre/fabricante en el SCAN_RSP, que no llega en pasivo: por eso el
-        // filtro acepta candidatos sin nombre y se valida después de conectar
-        // con el servicio HID (0x1812).
-        scan->setActiveScan(false);       // pasivo: sin SCAN_REQ
-        scan->setInterval(100);           // 100 ms entre ventanas
-        scan->setWindow(100);             // ventana continua (máxima captura)
-        scan->setDuplicateFilter(false);  // reporta todas las tramas
+        // ESCANEO ACTIVO (SCAN_REQ): necesario para recibir el Scan Response,
+        // donde el Xbox 1708 anuncia nombre y manufacturer data; en escaneo
+        // pasivo esa información se pierde y la identificación estricta
+        // fallaría. Si el radio real no recibiera tramas con SCAN_REQ (0
+        // devices en escaneos consecutivos), volver a pasivo cambiando esta
+        // línea a setActiveScan(false).
+        scan->setActiveScan(true);
+        scan->setInterval(100);
+        scan->setWindow(100);
+        scan->setDuplicateFilter(false);
     }
     devicesSeen = 0;
-    Serial.println("[GAMEPAD] Scanning...");
+    Serial.println("[GAMEPAD] SCANNING");
 
-    // IMPORTANTE: scanCompleteCB = true. Con `false`, NimBLE NO invoca
-    // onScanEnd al terminar el periodo: scanFinished nunca se activa y la
-    // máquina de estados queda atascada en SCANNING para siempre (solo
-    // escanea una vez al arrancar y jamás reintenta ni conecta).
-    // Async: no bloquea loop(); al terminar se invoca onScanEnd.
+    // scanCompleteCB = true: sin él, NimBLE no invoca onScanEnd y la máquina
+    // de estados quedaría atascada en SCANNING. Async: no bloquea loop().
     if (!scan->start(GAMEPAD_SCAN_TIME_MS, true)) {
-        Serial.println("[GAMEPAD] ERROR: scan->start() failed - retry in 3 s");
+        Serial.println("[GAMEPAD] FAILED: scan start");
         phase = Phase::RETRY_WAIT;
         phaseEnteredAt = millis();
     }
@@ -184,13 +167,15 @@ void GamepadController::update() {
     if (linkLost) {
         linkLost = false;
         if (phase == Phase::CONNECTED) {
+            Serial.println("[GAMEPAD] FAILED: link lost");
             connected = false;
+            notifyEnabled = false;
+            inputState.invalidate();
             state.connected = false;
             disconnectClient();
             phase = Phase::RETRY_WAIT;
             phaseEnteredAt = millis();
             if (stopCb != nullptr) stopCb(); // parada inmediata
-            Serial.println("[GAMEPAD] Disconnected");
         }
     }
 
@@ -202,7 +187,7 @@ void GamepadController::update() {
             if (found) {
                 phase = Phase::CONNECTING;
             } else {
-                // No se encontró el mando: reintentar tras una pausa
+                // No se identificó el mando: reintentar tras una pausa
                 phase = Phase::RETRY_WAIT;
                 Serial.printf("[GAMEPAD] Scan finished (%u devices) - retry in %u s\n",
                               (unsigned)devicesSeen,
@@ -212,14 +197,13 @@ void GamepadController::update() {
         }
     }
 
-    // Fallback de robustez: si el mando se encontró pero onScanEnd no llegó
+    // Fallback de robustez: si el mando se identificó pero onScanEnd no llegó
     // (p. ej. porque se llamó scan->stop() dentro del propio callback), se
     // pasa igualmente a CONNECTING.
     if (foundDevice && phase == Phase::SCANNING) {
         foundDevice = false;
         phase = Phase::CONNECTING;
         phaseEnteredAt = millis();
-        Serial.println("[GAMEPAD] Controller found - connecting");
     }
 
     // --- Procesar el último report recibido ---
@@ -237,7 +221,7 @@ void GamepadController::update() {
         static unsigned long lastReportLog = 0;
         if (millis() - lastReportLog >= 100) {
             lastReportLog = millis();
-            Serial.printf("[GAMEPAD] len=%u\n", (unsigned)len);
+            Serial.printf("[GAMEPAD] report len=%u\n", (unsigned)len);
             Serial.print("[GAMEPAD] data:");
             for (uint8_t i = 0; i < len; i++) {
                 Serial.printf(" %02X", buf[i]);
@@ -247,15 +231,15 @@ void GamepadController::update() {
 #endif
 
         if (parser.parseReport(buf, len, state)) {
-            // El watchdog solo se alimenta con reportes VÁLIDOS: un reporte
+            // El watchdog SOLO se alimenta con reportes VÁLIDOS: un reporte
             // inválido no mantiene vivo al robot.
             lastReportMillis = millis();
-            state.connected = true; // estado nuevo listo para getState()
+            state.connected = true;
 
-            if (!firstValidReport) {
-                firstValidReport = true;
-                Serial.println("[GAMEPAD] First valid report received");
+            if (!inputState.isValid()) {
+                Serial.println("[GAMEPAD] FIRST VALID REPORT");
             }
+            inputState.markValid(millis()); // transición al Estado 4
 
 #if DEBUG_GAMEPAD_REPORTS
             Serial.printf("[GAMEPAD] LX=%u LY=%u RX=%u RY=%u\n",
@@ -278,21 +262,36 @@ void GamepadController::update() {
             connectToPad(); // bloqueante; siempre transiciona de fase
             break;
 
-        case Phase::CONNECTED:
-            // Failsafe crítico: sin reporte VÁLIDO en GAMEPAD_TIMEOUT_MS el
-            // estado pasa a desconectado de verdad: se detienen los motores,
-            // se corta el enlace y se entra en reconexión. Así el último
-            // estado jamás vuelve a mover el robot.
-            if (millis() - lastReportMillis > GAMEPAD_TIMEOUT_MS) {
+        case Phase::CONNECTED: {
+            if (inputState.isValid()) {
+                // Watchdog normal: sin reporte VÁLIDO en GAMEPAD_TIMEOUT_MS el
+                // estado pasa a desconectado de verdad: se detienen los
+                // motores, se corta el enlace y se entra en reconexión. Así el
+                // último estado jamás vuelve a mover el robot.
+                if (!inputState.checkValid(millis(), GAMEPAD_TIMEOUT_MS)) {
+                    Serial.println("[GAMEPAD] FAILED: report timeout");
+                    connected = false;
+                    notifyEnabled = false;
+                    state.connected = false;
+                    disconnectClient();
+                    if (stopCb != nullptr) stopCb();
+                    phase = Phase::RETRY_WAIT;
+                    phaseEnteredAt = millis();
+                }
+            } else if (millis() - connectedAt > GAMEPAD_FIRST_REPORT_TIMEOUT_MS) {
+                // Conectado y notificando pero sin ningún reporte válido:
+                // la conexión no es operativa, se cierra y se reintenta.
+                Serial.println("[GAMEPAD] FAILED: no valid report after connect");
                 connected = false;
+                notifyEnabled = false;
                 state.connected = false;
                 disconnectClient();
                 if (stopCb != nullptr) stopCb();
                 phase = Phase::RETRY_WAIT;
                 phaseEnteredAt = millis();
-                Serial.println("[GAMEPAD] Report timeout - disconnected");
             }
             break;
+        }
 
         case Phase::RETRY_WAIT:
             if (millis() - phaseEnteredAt >= GAMEPAD_RETRY_DELAY_MS) {
@@ -306,15 +305,14 @@ void GamepadController::update() {
 
 void GamepadController::connectToPad() {
     if (!haveAddress) {
-        phase = Phase::RETRY_WAIT;
-        phaseEnteredAt = millis();
+        failAndRetry("connect", "no target address");
         return;
     }
 
     // Seguridad: detener el robot antes de bloquear loop() con la conexión
     if (stopCb != nullptr) stopCb();
 
-    Serial.println("[GAMEPAD] Connecting...");
+    Serial.println("[GAMEPAD] CONNECTING");
 
     // El cliente se crea una sola vez y se reutiliza en cada reconexión:
     // evita fugas de heap.
@@ -328,62 +326,87 @@ void GamepadController::connectToPad() {
 
     // connect() es bloqueante; el timeout (setConnectTimeout) limita la espera.
     if (!client->connect(padAddress)) {
-        Serial.println("[GAMEPAD] Connect failed");
         client->disconnect();
-        phase = Phase::RETRY_WAIT;
-        phaseEnteredAt = millis();
+        failAndRetry("connect", "connection refused");
         return;
     }
-    Serial.println("[GAMEPAD] Connected");
+    Serial.println("[GAMEPAD] CONNECTED");
 
-    // El Xbox 1708 exige encriptación/bonding para HID over GATT: sin esto
-    // rechaza la suscripción al Report (0x2A4D). secureConnection() inicia el
-    // pairing Just Works si no hay claves guardadas, o restaura el bond.
-    if (client->secureConnection()) {
-        Serial.println("[GAMEPAD] Link secured (pairing OK)");
-    } else {
-        Serial.println("[GAMEPAD] Warning: link not secured, subscription may fail");
+    // SEGURIDAD: HID over GATT exige enlace encriptado y vinculado. Si el
+    // pairing/secure connection falla, la conexión NO es válida: se cierra y
+    // se reintenta. No se continúa hacia HID en un enlace no seguro.
+    if (!client->secureConnection()) {
+        client->disconnect();
+        failAndRetry("security", "pairing/encryption failed");
+        return;
     }
+    Serial.println("[GAMEPAD] SECURITY OK");
 
     // Descubrir el servicio HID (el descubrimiento GATT es automático en NimBLE)
-    NimBLERemoteService* hidService = client->getService(NimBLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
+    NimBLERemoteService* hidService =
+        client->getService(NimBLEUUID((uint16_t)GAMEPAD_HID_SERVICE_UUID));
     if (hidService == nullptr) {
-        Serial.println("[GAMEPAD] HID service not found");
-        client->disconnect();
-        phase = Phase::RETRY_WAIT;
-        phaseEnteredAt = millis();
+        failAndRetry("hid service", "0x1812 not found");
         return;
     }
-    Serial.println("[GAMEPAD] HID service found");
+    Serial.println("[GAMEPAD] HID SERVICE FOUND");
 
-    // Suscribirse a notifications de la(s) characteristic(s) de Report.
-    // El servicio HID puede exponer varios 0x2A4D (input/output/feature): solo
-    // el Report de entrada (input) soporta Notify. Suscribirse a un Report de
-    // salida (vibración) o de feature puede provocar que el mando cierre la
-    // conexión, por eso se filtra con canNotify() antes de suscribirse.
-    bool subscribed = false;
+    // Seleccionar el INPUT Report (0x2A4D notificable). El servicio HID puede
+    // exponer varios 0x2A4D (input/output/feature): se usa el descriptor
+    // Report Reference (0x2908) para elegir el de tipo Input (1). Sin
+    // descriptor disponible, se toma la única notificable como reserva.
+    NimBLERemoteCharacteristic* inputReport = nullptr;
+    bool usedReportReference = false;
     const std::vector<NimBLERemoteCharacteristic*>& chars = hidService->getCharacteristics();
     for (NimBLERemoteCharacteristic* ch : chars) {
-        if (ch->getUUID() == NimBLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID) && ch->canNotify()) {
-            Serial.println("[GAMEPAD] Report characteristic found");
-            if (ch->subscribe(true, onReportNotify)) {
-                subscribed = true;
-                Serial.println("[GAMEPAD] Notification enabled");
+        if (ch->getUUID() != NimBLEUUID((uint16_t)GAMEPAD_REPORT_CHAR_UUID)) {
+            continue;
+        }
+        if (!ch->canNotify()) {
+            continue; // el Input Report es el único que soporta Notify
+        }
+
+        bool isInput = false;
+        NimBLERemoteDescriptor* ref =
+            ch->getDescriptor(NimBLEUUID((uint16_t)GAMEPAD_REPORT_REFERENCE_UUID));
+        if (ref != nullptr) {
+            std::string value = ref->readValue();
+            // Report Reference: [Report ID, Report Type]; 1 = Input
+            if (value.length() >= 2 && (uint8_t)value[1] == 1) {
+                isInput = true;
+                usedReportReference = true;
             }
+        }
+
+        if (isInput) {
+            inputReport = ch;
+            break;
+        }
+        if (inputReport == nullptr) {
+            inputReport = ch; // reserva: única notificable sin Report Reference
         }
     }
 
-    if (!subscribed) {
-        Serial.println("[GAMEPAD] Report not found");
-        client->disconnect();
-        phase = Phase::RETRY_WAIT;
-        phaseEnteredAt = millis();
+    if (inputReport == nullptr) {
+        failAndRetry("input report", "no notifiable 0x2A4D");
         return;
     }
+    Serial.println(usedReportReference
+        ? "[GAMEPAD] INPUT REPORT FOUND (Report Reference)"
+        : "[GAMEPAD] INPUT REPORT FOUND (fallback: única notificable)");
 
+    if (!inputReport->subscribe(true, onReportNotify)) {
+        failAndRetry("notify", "subscription rejected");
+        return;
+    }
+    Serial.println("[GAMEPAD] NOTIFY ENABLED");
+
+    // Estado 3 alcanzado. El Estado 4 (input válido) exige el primer reporte
+    // decodificado correctamente; mientras tanto NO se autoriza movimiento.
     connected = true;
-    lastReportMillis = millis();
-    firstValidReport = false; // aún no hay un reporte válido de esta conexión
+    notifyEnabled = true;
+    inputState.invalidate();
+    connectedAt = millis();
     phase = Phase::CONNECTED;
     phaseEnteredAt = millis();
 }
@@ -394,13 +417,29 @@ void GamepadController::disconnectClient() {
     }
 }
 
+void GamepadController::failAndRetry(const char* stage, const char* reason) {
+    Serial.printf("[GAMEPAD] FAILED: %s (%s)\n", stage, reason);
+    disconnectClient();
+    connected = false;
+    notifyEnabled = false;
+    inputState.invalidate();
+    state.connected = false;
+    if (stopCb != nullptr) stopCb();
+    phase = Phase::RETRY_WAIT;
+    phaseEnteredAt = millis();
+}
+
 bool GamepadController::isConnected() {
-    return connected;
+    return connected; // Estado 1: GATT conectado
+}
+
+bool GamepadController::isInputActive() {
+    return inputState.isValid(); // Estado 4: único que autoriza movimiento
 }
 
 GamepadState GamepadController::getState() {
     GamepadState s = state; // solo se modifica desde loop(): sin mux
-    s.connected = connected;
+    s.connected = isInputActive();
     return s;
 }
 
@@ -410,12 +449,14 @@ void GamepadController::setStopCallback(GamepadStopCallback cb) {
 
 // --- Entradas desde los callbacks BLE (tarea del stack) ---
 
-// Diagnóstico del escaneo: cuenta dispositivos vistos y registra con throttle
-// el nombre, fabricante y RSSI, para verificar qué anuncia el entorno.
+// Diagnóstico del escaneo: cuenta dispositivos vistos. El detalle (dirección,
+// nombre, RSSI, appearance) solo se imprime con GAMEPAD_DEBUG_SCAN == 1; en
+// producción la dirección BLE no debe aparecer en los logs.
 void GamepadController::noteScanResult(const NimBLEAdvertisedDevice* device) {
     if (device == nullptr) return;
     devicesSeen++;
 
+#if GAMEPAD_DEBUG_SCAN
     static unsigned long lastLog = 0;
     unsigned long now = millis();
     if (now - lastLog < 300) return; // máximo ~3 líneas/s
@@ -427,17 +468,26 @@ void GamepadController::noteScanResult(const NimBLEAdvertisedDevice* device) {
     } else {
         Serial.print("(sin nombre) ");
     }
-    Serial.printf("addr=%s MS=%u rssi=%d\n",
+    Serial.printf("addr=%s appearance=0x%04X rssi=%d\n",
                   device->getAddress().toString().c_str(),
-                  (unsigned)isMicrosoftDevice(*device),
+                  device->haveAppearance() ? device->getAppearance() : 0,
                   device->getRSSI());
+#endif
 }
 
-void GamepadController::rememberFoundDevice(const NimBLEAddress& addr) {
-    Serial.println("[GAMEPAD] Found controller");
-    padAddress = addr;
+void GamepadController::rememberFoundDevice(const NimBLEAdvertisedDevice* device) {
+    padAddress = device->getAddress();
     haveAddress = true;
     foundDevice = true;
+
+    Serial.print("[GAMEPAD] CANDIDATE FOUND");
+#if GAMEPAD_DEBUG_SCAN
+    Serial.printf(" addr=%s", padAddress.toString().c_str());
+#endif
+    if (device->haveName()) {
+        Serial.printf(" name='%s'", device->getName().c_str());
+    }
+    Serial.printf(" rssi=%d\n", device->getRSSI());
 }
 
 void GamepadController::scanStopped() {

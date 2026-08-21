@@ -32,7 +32,7 @@ void loop() {
     if (scan == nullptr) {
         scan = NimBLEDevice::getScan();
         scan->setScanCallbacks(new ScanCB());
-        scan->setActiveScan(false);
+        scan->setActiveScan(true); // activo: recibe nombre/fabricante en el SCAN_RSP
         scan->setInterval(100);
         scan->setWindow(50);
         scan->setDuplicateFilter(false);

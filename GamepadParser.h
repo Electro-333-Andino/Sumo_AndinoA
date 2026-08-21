@@ -46,7 +46,7 @@ struct GamepadState {
     // D-Pad crudo (byte 12): 1=arriba, 2=arriba-der, ..., 8=arriba-izq, 0=none
     uint8_t dpad;
 
-    // true mientras haya un mando conectado y reportando
+    // true mientras haya un mando conectado y reportando (input válido)
     bool connected;
 };
 
@@ -62,8 +62,9 @@ class GamepadParser {
 public:
     GamepadParser();
 
-    // Devuelve false si el report no corresponde al mando configurado.
-    // Solo actualiza `out` cuando devuelve true.
+    // Devuelve false si el report no corresponde al mando configurado
+    // (longitud distinta de 16 bytes o datos nulos). Solo actualiza `out`
+    // cuando devuelve true.
     bool parseReport(const uint8_t* data, size_t len, GamepadState& out) const;
 
 private:

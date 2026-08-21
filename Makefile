@@ -23,7 +23,7 @@ all: test
 test: tests/test_gamepad
 	./tests/test_gamepad
 
-tests/test_gamepad: tests/test_gamepad.cpp GamepadParser.cpp GamepadMixer.cpp tests/stubs/Arduino.h
+tests/test_gamepad: tests/test_gamepad.cpp GamepadParser.cpp GamepadMixer.cpp GamepadFilter.h GamepadInputState.h tests/stubs/Arduino.h
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 compile:

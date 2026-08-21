@@ -19,13 +19,11 @@
 // ============================================================================
 // MANDO OBJETIVO: Xbox Wireless Controller Model 1708 (Xbox One S) por BLE
 // ============================================================================
-// Layout verificado contra la implementación de referencia BLE-Gamepad-Client
-// (https://github.com/tbekas/BLE-Gamepad-Client), que soporta explícitamente
-// el modelo 1708, y contra el descriptor HID real del mando.
-//
-// El mando entrega el payload de la característica Report (0x2A4D) SIN el
-// Report ID como primer byte: la referencia decodifica data[0..1] como LX.
-// Los ejes son uint16 little-endian con rango 0..65535 (centro 32768).
+// Formato tomado de la implementación de referencia BLE-Gamepad-Client
+// (https://github.com/tbekas/BLE-Gamepad-Client), que soporta específicamente
+// el Xbox One 1697/1708 por BLE. Su decodificador Xbox trabaja con un reporte
+// de 16 bytes: el payload de la característica Report (0x2A4D) NO incluye el
+// Report ID como primer byte (data[0..1] = Left Stick X).
 //
 //   Offset  Tamaño   Campo
 //   0..1    u16 LE   Left Stick X   0 = izquierda, 32768 = centro, 65535 = derecha
@@ -37,21 +35,18 @@
 //   12      1 byte   D-Pad          1=arriba, 2=arriba-der, ..., 8=arriba-izq, 0=none
 //   13      1 byte   Botones 1      A=0x01, B=0x02, X=0x08, Y=0x10, LB=0x40, RB=0x80
 //   14      1 byte   Botones 2      View=0x04, Menu=0x08, Xbox=0x10, LS=0x20, RS=0x40
-//   15      1 byte   Botones 3      Share=0x01  [solo en el reporte de 16 bytes]
+//   15      1 byte   Botones 3      Share=0x01
 //
-// Longitudes soportadas (variantes reales del 1708):
-//   - 16 bytes: reporte completo (incluye el byte 15 de Share).
-//   - 15 bytes: el descriptor puede anunciar 16 bytes mientras el firmware
-//     transmite 15 (documentado en ciertos 1708 con firmware moderno). Se
-//     parsean los offsets 0..14 y el campo de 16 bytes queda en false; NO se
-//     desplazan los offsets para compensar el tamaño.
-//   - 17 bytes: variante que SÍ incluye el Report ID 0x01 como primer byte
-//     (depende de cómo cada stack BLE entregue el valor); se salta ese byte.
+// El parser acepta ÚNICAMENTE reportes de 16 bytes. No se asume la variante
+// de 15 bytes (documentada en xpadneo para Bluetooth Classic) ni un Report ID
+// añadido: si el mando real entregara otra longitud, debe registrarse por
+// Serial (DEBUG_GAMEPAD_REPORTS), inspeccionarse el descriptor HID y adaptar
+// este layout documentando el cambio.
 // ============================================================================
 
-static constexpr uint8_t XBOX_REPORT_ID = 0x01;
+static constexpr uint8_t REPORT_LEN = 16;
 
-// Offsets del payload (sin contar el posible Report ID)
+// Offsets del payload
 static constexpr uint8_t OFF_LX = 0;
 static constexpr uint8_t OFF_LY = 2;
 static constexpr uint8_t OFF_RX = 4;
@@ -60,10 +55,6 @@ static constexpr uint8_t OFF_DPAD = 12;
 static constexpr uint8_t OFF_BUTTONS_1 = 13;
 static constexpr uint8_t OFF_BUTTONS_2 = 14;
 static constexpr uint8_t OFF_BUTTONS_3 = 15;
-
-// Longitudes válidas del payload (variantes reales del 1708)
-static constexpr uint8_t MIN_REPORT_LEN = 15;
-static constexpr uint8_t MAX_REPORT_LEN = 16;
 
 // Rango de los ejes (uint16 LE, centro 32768)
 static constexpr int32_t AXIS_MIN    = 0;
@@ -90,24 +81,11 @@ static uint16_t makeUint16(const uint8_t* p) {
 }
 
 bool GamepadParser::parseReport(const uint8_t* data, size_t len, GamepadState& out) const {
-    if (data == nullptr || len == 0) {
-        return false;
+    if (data == nullptr || len != REPORT_LEN) {
+        return false; // longitud distinta de 16 bytes: no es el reporte del 1708
     }
 
-    // Variante que incluye el Report ID (según el stack BLE): se salta el
-    // primer byte. La variante principal (sin ID) no exige data[0] == 0x01.
-    size_t offset = 0;
-    if (len == (size_t)MAX_REPORT_LEN + 1 && data[0] == XBOX_REPORT_ID) {
-        offset = 1;
-    }
-    size_t payloadLen = len - offset;
-
-    // Solo las longitudes reales del 1708 (15 y 16 bytes) son válidas.
-    if (payloadLen < MIN_REPORT_LEN || payloadLen > MAX_REPORT_LEN) {
-        return false;
-    }
-
-    const uint8_t* p = data + offset;
+    const uint8_t* p = data;
 
     uint16_t lx = makeUint16(p + OFF_LX);
     uint16_t ly = makeUint16(p + OFF_LY);

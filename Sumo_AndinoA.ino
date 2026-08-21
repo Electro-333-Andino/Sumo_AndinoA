@@ -61,7 +61,7 @@ uint16_t DEFAULT_TURN_SPEED  = 1023;
 
 // DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZADO/SALIDA por Serial; 0 = silencio
 #ifndef GAMEPAD_DEBUG
-#define GAMEPAD_DEBUG 0
+#define GAMEPAD_DEBUG 1
 #endif
 
 // --- INSTANCIACIÓN ---
@@ -270,11 +270,13 @@ void loopAppMode() {
 void loopXboxMode() {
   gamepad.update(); // escaneo/conexión/reports del mando
 
-  bool isPadActive = gamepad.isConnected();
-  statusLed.setConnected(isPadActive);
+  // Solo el Estado 4 (GATT + Notify + primer reporte válido + sin timeout)
+  // autoriza el movimiento: isConnected() no basta para mover el robot.
+  bool padReady = gamepad.isInputActive();
+  statusLed.setConnected(padReady);
   statusLed.update();
 
-  if (isPadActive) {
+  if (padReady) {
     processGamepadControl();
   }
 }

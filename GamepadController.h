@@ -20,39 +20,32 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include "GamepadParser.h"
+#include "GamepadFilter.h"
+#include "GamepadInputState.h"
 
-// Tiempo máximo sin recibir un report del mando antes de detener el robot.
-// El SafetyManager del teléfono usa 1500 ms; el mando necesita un failsafe
-// mucho más agresivo porque reporta continuamente durante la conducción.
+// Timeout sin reporte VÁLIDO antes de detener el robot y desconectar.
 #ifndef GAMEPAD_TIMEOUT_MS
 #define GAMEPAD_TIMEOUT_MS 200
 #endif
 
-// Timeout de cada intento de conexión en milisegundos (client->connect() es
-// bloqueante para loop()). En competencia conviene un valor corto: 2000 ms
-// evita perder el combate esperando una reconexión que no llega; subirlo a
-// 4000-5000 ms da más margen en entornos con mucha interferencia RF.
+// Timeout de cada intento de conexión (client->connect() es bloqueante para
+// loop()). En competencia conviene un valor corto: 2000 ms.
 #ifndef GAMEPAD_CONNECT_TIMEOUT_MS
 #define GAMEPAD_CONNECT_TIMEOUT_MS 2000
 #endif
 
-// Filtro de nombre del mando (subcadena). Vacío = aceptar cualquier
-// dispositivo. Por defecto busca el nombre real del Xbox 1708.
-#ifndef GAMEPAD_NAME_FILTER
-#define GAMEPAD_NAME_FILTER "Xbox Wireless Controller"
+// Tiempo máximo esperando el PRIMER reporte válido tras habilitar Notify.
+// El 1708 reporta continuamente durante la conducción; si no llega nada en
+// este plazo la conexión se considera no operativa y se reintenta.
+#ifndef GAMEPAD_FIRST_REPORT_TIMEOUT_MS
+#define GAMEPAD_FIRST_REPORT_TIMEOUT_MS 1000
 #endif
 
-// Validación opcional del manufacturer data durante el escaneo:
-// 1 = habilitada: si el nombre no coincide, se acepta un dispositivo de
-//     Microsoft (0x0006) sin nombre anunciado (variante del 1708 que no
-//     anuncia nombre); 0 = solo validar por nombre.
-#ifndef GAMEPAD_VALIDATE_MANUFACTURER
-#define GAMEPAD_VALIDATE_MANUFACTURER 1
-#endif
-
-// Servicio HID estándar y su characteristic de Report
-#define GAMEPAD_HID_SERVICE_UUID 0x1812
-#define GAMEPAD_REPORT_CHAR_UUID 0x2A4D
+// Servicio HID estándar, su characteristic de Report y el descriptor
+// Report Reference (0x2908: identifica el tipo de reporte; 1 = Input).
+#define GAMEPAD_HID_SERVICE_UUID       0x1812
+#define GAMEPAD_REPORT_CHAR_UUID       0x2A4D
+#define GAMEPAD_REPORT_REFERENCE_UUID  0x2908
 
 // Tamaño máximo de un HID report (los de gamepads suelen ser <= 20 bytes)
 #define GAMEPAD_MAX_REPORT_LEN 20
@@ -63,43 +56,51 @@
 #define DEBUG_GAMEPAD_REPORTS 0
 #endif
 
-// Callback de seguridad: se invoca para detener el robot ante
-// desconexión del mando, timeout de reports o antes de un intento
-// de conexión (porque este es bloqueante y congela loop()).
+// DEBUG DE ESCANEO: 1 = imprime por dispositivo visto su dirección, nombre,
+// RSSI, appearance y manufacturer data; 0 = solo logs de etapa (producción).
+#ifndef GAMEPAD_DEBUG_SCAN
+#define GAMEPAD_DEBUG_SCAN 0
+#endif
+
+// Callback de seguridad: se invoca para detener el robot ante desconexión,
+// timeout de reports o antes de un intento de conexión bloqueante.
 typedef void (*GamepadStopCallback)();
 
 // Cliente BLE (central) que busca el mando, se conecta, se suscribe al
-// HID Report y actualiza un GamepadState.
+// HID Input Report y actualiza un GamepadState.
 //
-// STACK BLE: NimBLE-Arduino (dependencia externa, la misma que usa la
-// implementación de referencia BLE-Gamepad-Client para el Xbox 1708). Todo el
-// proyecto usa NimBLE: el servidor de la app (BleManager) y este cliente
-// comparten el mismo stack, por lo que los modos App/Xbox son compatibles.
+// STACK BLE: NimBLE-Arduino (la misma que usa la implementación de referencia
+// BLE-Gamepad-Client para el Xbox 1708). El servidor de la app (BleManager) y
+// este cliente comparten el stack NimBLE.
+//
+// Estados de la conexión (el movimiento SOLO se autoriza en el Estado 4):
+//   1. GATT conectado            -> isConnected()
+//   2. HID service 0x1812        -> log "HID SERVICE FOUND"
+//   3. Input Report + Notify     -> notifyEnabled
+//   4. Primer reporte válido     -> isInputActive() == true (inputState)
 class GamepadController {
 public:
     GamepadController();
 
-    // Inicializa el cliente BLE de forma autónoma: llama a NimBLEDevice::init()
-    // (idempotente) y configura la seguridad requerida por el Xbox (Secure
-    // Connections + Bonding, Just Works).
+    // Inicializa el cliente BLE: NimBLEDevice::init() (idempotente) y
+    // seguridad requerida por el Xbox (Secure Connections + Bonding, Just Works).
     void begin();
 
-    // Máquina de estados: escaneo -> conexión -> suscripción -> reports.
-    // Llamar desde loop(). Durante un intento de conexión puede bloquear
-    // hasta GAMEPAD_CONNECT_TIMEOUT_MS; antes de eso invoca stopCb.
+    // Máquina de estados: escaneo -> identificación -> conexión -> seguridad
+    // -> HID -> suscripción -> reports. Llamar desde loop().
     void update();
 
-    bool isConnected();
+    bool isConnected();    // Estado 1: enlace GATT establecido
+    bool isInputActive();  // Estado 4: input válido (único que autoriza movimiento)
     GamepadState getState();
 
     void setStopCallback(GamepadStopCallback cb);
 
     // --- Usados internamente por los callbacks BLE (tarea del stack) ---
-    void rememberFoundDevice(const NimBLEAddress& addr);
+    void rememberFoundDevice(const NimBLEAdvertisedDevice* device);
     void scanStopped();
     void clientDisconnected();
     void storeReport(const uint8_t* data, size_t len);
-    // Diagnóstico del escaneo (invocado desde onResult, tarea BLE)
     void noteScanResult(const NimBLEAdvertisedDevice* device);
 
 private:
@@ -109,32 +110,38 @@ private:
     void connectToPad();
     void disconnectClient();
 
+    // Registra el fallo por etapa, cierra la conexión y programa el reintento.
+    void failAndRetry(const char* stage, const char* reason);
+
     NimBLEScan* scan;
     NimBLEClient* client;
 
-    NimBLEAddress padAddress;   // mando objetivo encontrado
+    NimBLEAddress padAddress;   // mando objetivo identificado
     bool haveAddress;
 
     Phase phase;
-    volatile bool foundDevice;  // el escaneo encontró un mando válido
+    volatile bool foundDevice;  // el escaneo identificó un mando válido
     volatile bool scanFinished; // el escaneo terminó (éxito o timeout)
-    volatile uint32_t devicesSeen; // dispositivos vistos en el último escaneo (diagnóstico)
+    volatile uint32_t devicesSeen; // dispositivos vistos en el último escaneo
     volatile bool linkLost;     // el enlace BLE se perdió
 
-    volatile bool connected;
-    volatile unsigned long lastReportMillis;
+    volatile bool connected;        // Estado 1: GATT conectado
+    volatile bool notifyEnabled;    // Estado 3: notificaciones habilitadas
+    volatile unsigned long connectedAt; // instante de conexión (deadline primer reporte)
+
+    volatile unsigned long lastReportMillis; // SOLO se actualiza con reports válidos
     volatile bool reportReady;
 
     uint8_t reportBuffer[GAMEPAD_MAX_REPORT_LEN];
     volatile uint8_t reportLen;
 
     GamepadState state;         // solo se toca desde loop(): sin mux
-    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED; // protege reportBuffer/reportReady/lastReport
+    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED; // protege reportBuffer/reportReady
 
     GamepadStopCallback stopCb;
     unsigned long phaseEnteredAt;
-    bool firstValidReport; // true tras el primer reporte válido de la conexión
 
+    GamepadInputState inputState; // Estado 4: validez del input (watchdog)
     GamepadParser parser;
 };
 

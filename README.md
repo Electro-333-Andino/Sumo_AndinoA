@@ -30,8 +30,11 @@ sin romper el resto del sistema.
     *   La velocidad crece suavemente según cuánto muevas el joystick (respuesta lineal con deadzone).
 *   **Seguridad integrada (anti-escape)**
     *   Parada inmediata de los motores ante cualquier desconexión o pérdida de señal.
+    *   El robot solo se mueve cuando el mando está en el **Estado 4** (conectado + notificando + primer reporte válido recibido).
+*   **Identificación estricta del mando**
+    *   Solo se acepta el Xbox 1708 (por nombre, o por appearance HID + fabricante Microsoft); un dispositivo BLE desconocido jamás controla el robot.
 *   **Indicador LED de estado**
-    *   Parpadeo rápido: buscando conexión. Parpadeo lento: conectado.
+    *   Parpadeo rápido: buscando conexión. Parpadeo lento: conectado y operativo.
 *   **Ligero y pensado para el ESP32-C3**
     *   Sin librerías pesadas de gamepads; buffers estáticos y aritmética entera.
 
@@ -130,17 +133,37 @@ Formato general: `DIRECCIÓN,VEL_IZQ,VEL_DER`, con velocidades de **0 a 1023**:
 
 ## Modo Xbox — control con el mando
 
-En este modo el ESP32 actúa como **cliente BLE (central)**: escanea, detecta el
-mando, se conecta, hace el emparejamiento (pairing automático, sin PIN) y se
-suscribe a las notificaciones HID.
+En este modo el ESP32 actúa como **cliente BLE (central)**: escanea, identifica
+el mando, se conecta, completa el pairing (automático, sin PIN), descubre el
+servicio HID y se suscribe al **Input Report**.
 
 | Parámetro | Valor |
 | :--- | :--- |
 | Mando soportado | Xbox Wireless Controller Model 1708 |
 | Protocolo | Bluetooth Low Energy (BLE) |
+| Pila BLE | NimBLE-Arduino |
 | HID Service | `0x1812` |
-| HID Report | `0x2A4D` |
-| Formato de ejes | uint16 little-endian, centro 32768 |
+| HID Report (Input) | `0x2A4D` |
+| Report Reference | `0x2908` (identifica el tipo de reporte) |
+| Formato del reporte | 16 bytes, sin Report ID (según BLE-Gamepad-Client) |
+
+### Identificación estricta del mando
+
+El escaneo es **activo** (recibe el Scan Response, donde el Xbox anuncia nombre
+y fabricante) y solo acepta el mando objetivo:
+
+*   **Caso A — tiene nombre:** se acepta solamente si el nombre contiene
+    `Xbox Wireless Controller`.
+*   **Caso B — no tiene nombre:** se acepta solamente si cumple **ambas**
+    condiciones: Appearance dentro del rango HID (`0x0380`–`0x039F`) **y**
+    Manufacturer Data de Microsoft (`0x0006`).
+
+Cualquier otro dispositivo (sin nombre, con otro nombre, otro fabricante) se
+**rechaza** y el escaneo continúa. Un dispositivo BLE desconocido jamás se
+convierte en el controlador del robot.
+
+> El Manufacturer Data es solo un criterio de identificación durante el
+> escaneo. La autenticación real la aporta BLE **Secure Connections + bonding**.
 
 ### Procedimiento de conexión
 
@@ -148,13 +171,26 @@ suscribe a las notificaciones HID.
 1. Enciende el robot (debe estar en Modo Xbox).
 2. Enciende el mando con el botón Xbox.
 3. Mantén pulsado el botón Pair del mando hasta que el LED parpadee.
-4. El ESP32 escanea y encuentra "Xbox Wireless Controller".
+4. El ESP32 escanea y identifica "Xbox Wireless Controller".
 5. Se realiza la conexión BLE y el pairing (automático, sin PIN).
-6. Se activan las notificaciones HID y el robot queda listo.
+6. Se descubre el HID y se activan las notificaciones del Input Report.
+7. Al recibir el primer reporte válido, el robot queda listo.
 ```
 
-Si el mando se desconecta, el ESP32 lo detecta, detiene el robot y vuelve a
-escaneando automáticamente para reconectarse.
+### Estados de la conexión
+
+El robot solo se mueve en el **Estado 4**:
+
+```text
+Estado 1  GATT conectado
+Estado 2  Servicio HID 0x1812 descubierto
+Estado 3  Input Report localizado y Notify habilitado
+Estado 4  Primer reporte HID válido recibido  ->  ÚNICO que autoriza movimiento
+```
+
+Una conexión GATT sin reportes HID válidos **no** mueve el robot. Si tras
+conectar no llega ningún reporte válido en `GAMEPAD_FIRST_REPORT_TIMEOUT_MS`
+(1 s), la conexión se cierra y se reintenta.
 
 ### Mapa de control
 
@@ -165,9 +201,8 @@ escaneando automáticamente para reconectarse.
 
 ### Velocidad proporcional
 
-La velocidad no es un interruptor: crece de forma proporcional a cuánto
-desplaces el joystick y nunca supera `configuredSpeed`. Con
-`configuredSpeed = 700`, por ejemplo:
+La velocidad crece de forma proporcional a cuánto desplaces el joystick y nunca
+supera `configuredSpeed`. Con `configuredSpeed = 700`, por ejemplo:
 
 | Posición del stick | Velocidad resultante |
 | :---: | :---: |
@@ -192,13 +227,18 @@ opuestos).
 
 ### Seguridad del mando
 
-*   El mando reporta continuamente (≈ cada 10 ms). Si deja de transmitir
-    durante **200 ms** (`GAMEPAD_TIMEOUT_MS`), el robot se **detiene de
-    inmediato**, pasa a estado desconectado y no vuelve a usar el último
-    comando hasta recibir un reporte nuevo y válido.
-*   Un reporte corrupto o inválido **no** mantiene vivo al robot ni lo mueve.
-*   En el arranque los motores están apagados: el robot no se mueve hasta que
-    llega el primer reporte válido del mando.
+*   El mando reporta continuamente (≈ cada 10 ms). Si no llega un reporte
+    **válido** durante **200 ms** (`GAMEPAD_TIMEOUT_MS`), el robot se detiene
+    de inmediato, el estado pasa a desconectado y **el último comando no se
+    reutiliza**: el robot permanece detenido hasta recibir un reporte nuevo y
+    válido.
+*   Un reporte corrupto, incompleto o de longitud incorrecta **no** alimenta el
+    watchdog ni mueve el robot (`lastReportMillis` solo se actualiza con
+    reportes que superan la validación del parser).
+*   Si el pairing o el enlace seguro fallan, la conexión **no** se considera
+    válida: se cierra y se reintenta el escaneo.
+*   En el arranque los motores están apagados: el robot no se mueve hasta el
+    primer reporte válido.
 
 ---
 
@@ -207,7 +247,7 @@ opuestos).
 *   **Modo App:** si el teléfono no envía comandos durante **450 ms**
     (`COMMAND_TIMEOUT_MS`), parada preventiva.
 *   **Modo Xbox:** si no llegan reportes válidos durante **200 ms**, parada
-    preventiva y reconexión automática.
+    preventiva, desconexión y reconexión automática.
 *   En cualquier desconexión BLE, los motores se frenan **al instante** desde el
     callback de desconexión (sin esperar al siguiente ciclo del programa).
 *   El botón BOOT sigue funcionando en ambos modos: es el único mecanismo para
@@ -221,12 +261,46 @@ opuestos).
 | :--- | :--- |
 | `Sumo_AndinoA.ino` | Orquestación: modos, botón BOOT, comandos del teléfono y bucle de control del mando |
 | `BleManager.h` / `.cpp` | Servidor BLE que atiende al teléfono Android |
-| `GamepadController.h` / `.cpp` | Cliente BLE: escaneo, conexión, pairing, suscripción HID y reconexión |
+| `GamepadController.h` / `.cpp` | Cliente BLE: escaneo, identificación, conexión, pairing, HID, suscripción y reconexión |
+| `GamepadFilter.h` | Identificación estricta del Xbox 1708 (lógica pura, testeable) |
+| `GamepadInputState.h` | Validez del input (Estado 4) y watchdog (lógica pura, testeable) |
 | `GamepadParser.h` / `.cpp` | Convierte el reporte HID del mando en un estado normalizado (deadzone y polaridad) |
 | `GamepadMixer.h` / `.cpp` | Mezcla diferencial: estado del mando → velocidad de cada motor |
 | `MotorController.h` / `.cpp` | Control del PWM y del sentido de giro del TB6612 |
 | `SafetyManager.h` | Watchdog de seguridad del teléfono |
 | `StatusLed.h` / `.cpp` | Indicador LED de estado |
+
+---
+
+## Diagnóstico por Serial
+
+El monitor serie (115200 baudios) muestra la secuencia completa de la conexión
+del mando:
+
+```text
+[GAMEPAD] SCANNING
+[GAMEPAD] CANDIDATE FOUND name='Xbox Wireless Controller' rssi=-45
+[GAMEPAD] CONNECTING
+[GAMEPAD] CONNECTED
+[GAMEPAD] SECURITY OK
+[GAMEPAD] HID SERVICE FOUND
+[GAMEPAD] INPUT REPORT FOUND (Report Reference)
+[GAMEPAD] NOTIFY ENABLED
+[GAMEPAD] FIRST VALID REPORT
+```
+
+Si algo falla, el log indica la etapa exacta:
+
+```text
+[GAMEPAD] FAILED: security (pairing/encryption failed)
+[GAMEPAD] FAILED: hid service (0x1812 not found)
+[GAMEPAD] FAILED: notify (subscription rejected)
+[GAMEPAD] FAILED: report timeout
+```
+
+Para depuración avanzada (dirección BLE, RSSI, appearance, bytes HID,
+sticks decodificados) activa las macros `GAMEPAD_DEBUG_SCAN` y
+`DEBUG_GAMEPAD_REPORTS`; en el firmware final deben quedarse en `0`.
 
 ---
 
@@ -266,15 +340,18 @@ Abre el monitor serie a 115200 baudios para ver la actividad del robot:
 
 ### Pruebas nativas (sin hardware)
 
-`GamepadParser` y `GamepadMixer` son funciones puras y se prueban en el
-ordenador antes de tocar el robot:
+`GamepadParser`, `GamepadMixer`, `GamepadFilter` y `GamepadInputState` son
+lógica pura y se prueban en el ordenador antes de tocar el robot:
 
 ```bash
 make test
 ```
 
-Ejecuta **13 casos** (centro, avance, retroceso, giros, deadzone, reportes de
-15/16/17 bytes, botones y mezcla) y debe terminar con `ALL TESTS PASSED`.
+Ejecuta las tres suites — **parser** (centro, avance, retroceso, giros,
+deadzone, reportes de 15/16/17 bytes, botones, mezcla), **filtro**
+(dispositivos incorrectos rechazados) y **watchdog** (timeout → motores a cero
+→ sin re-aplicación del último comando → recuperación) — y debe terminar con
+`ALL TESTS PASSED`.
 
 ---
 
@@ -284,19 +361,16 @@ Ejecuta **13 casos** (centro, avance, retroceso, giros, deadzone, reportes de
 | :--- | :--- | :--- |
 | Nombre BLE del robot | `Sumo_AndinoA.ino` → `BleManager bluetooth(...)` | `Robotini16` |
 | Watchdog del teléfono | `Sumo_AndinoA.ino` → `COMMAND_TIMEOUT_MS` | 450 ms |
-| Filtro de nombre del mando | `GamepadController.h` → `GAMEPAD_NAME_FILTER` | `"Xbox Wireless Controller"` |
 | Timeout de reports del mando | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
+| Timeout del primer reporte | `GamepadController.h` → `GAMEPAD_FIRST_REPORT_TIMEOUT_MS` | 1000 ms |
 | Timeout de conexión BLE | `GamepadController.h` → `GAMEPAD_CONNECT_TIMEOUT_MS` | 2000 ms |
+| Nombre objetivo del mando | `GamepadFilter.h` → `TARGET_NAME` | `Xbox Wireless Controller` |
+| Rango de Appearance HID | `GamepadFilter.h` → `HID_APPEARANCE_MIN/MAX` | `0x0380`–`0x039F` |
+| Company ID de Microsoft | `GamepadFilter.h` → `MICROSOFT_COMPANY_ID` | `0x0006` |
 | Deadzone de los sticks | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
 | Debug del mando (Serial) | `Sumo_AndinoA.ino` → `GAMEPAD_DEBUG` | 0 (apagado) |
+| Debug de escaneo (dirección, RSSI...) | `GamepadController.h` → `GAMEPAD_DEBUG_SCAN` | 0 (apagado) |
 | Dump de reports HID | `GamepadController.h` → `DEBUG_GAMEPAD_REPORTS` | 0 (apagado) |
-
-Con `GAMEPAD_DEBUG = 1` el monitor serie muestra el estado decodificado del
-mando, útil para verificar el parser y la mezcla:
-
-```text
-[PAD] RAW LY=0 RX=65535 | NLY=1000 NRX=1000 | L=700 R=-700
-```
 
 ---
 
