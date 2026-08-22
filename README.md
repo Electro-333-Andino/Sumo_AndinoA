@@ -126,6 +126,10 @@ Formato general: `DIRECCIÓN,VEL_IZQ,VEL_DER`, con velocidades de **0 a 1023**:
 | `R` | `R` o `R,500,500` | Gira a la derecha (sin velocidades: 1023) |
 | `S` | `S` | Frena en seco |
 
+Los comandos se **validan estrictamente** (`CommandParser`): comando conocido,
+parámetros completos, valores numéricos y velocidades dentro de 0–1023.
+Un comando inválido **no alimenta el watchdog** y provoca parada de seguridad.
+
 > **Velocidad compartida:** el último comando del teléfono fija `configuredSpeed`,
 > que el modo Xbox reutiliza como velocidad máxima del mando.
 
@@ -248,12 +252,30 @@ opuestos).
 
 ## Seguridad integrada (ambos modos)
 
-*   **Modo App:** si el teléfono no envía comandos durante **450 ms**
-    (`COMMAND_TIMEOUT_MS`), parada preventiva.
-*   **Modo Xbox:** si no llegan reportes válidos durante **200 ms**, parada
+### Máquina de estados fail-safe (modo App)
+
+```text
+DISCONNECTED ──conexión──▶ WAITING_FOR_COMMAND ──comando válido──▶ READY/MOVING
+      ▲                                                              │
+      │                                                              │ watchdog
+      │                                                              ▼
+      └──────desconexión────────────────────────── TIMEOUT ──▶ EMERGENCY_STOP
+                                                                    │
+                                         ┌──────────────────────────┘
+                                         ▼
+                          solo un comando VÁLIDO nuevo = CONTROL RESTORED
+```
+
+*   **Modo App:** si no llega un comando **válido** (F/B/L/R/S correcto) durante
+    **250 ms** (`COMMAND_TIMEOUT_MS`), parada de emergencia. La app envía cada
+    ~50 ms; un comando inválido o un paquete corrupto **no** mantiene vivo al robot.
+*   **Modo Xbox:** si no llegan reportes HID válidos durante **200 ms**, parada
     preventiva, desconexión y reconexión automática.
 *   En cualquier desconexión BLE, los motores se frenan **al instante** desde el
-    callback de desconexión (sin esperar al siguiente ciclo del programa).
+    callback de desconexión y se descarta el comando pendiente (`lastCommand = "S"`):
+    tras reconectar, el robot **no** reutiliza el último comando y espera uno nuevo.
+*   El robot arranca siempre detenido y el cambio de modo ejecuta `emergencyStop()`
+    antes de reiniciar.
 *   El botón BOOT sigue funcionando en ambos modos: es el único mecanismo para
     cambiar de modo, incluso en plena competición.
 
@@ -264,14 +286,15 @@ opuestos).
 | Archivo | Responsabilidad |
 | :--- | :--- |
 | `Sumo_AndinoA.ino` | Orquestación: modos, botón BOOT, comandos del teléfono y bucle de control del mando |
-| `BleManager.h` / `.cpp` | Servidor BLE que atiende al teléfono Android |
+| `BleManager.h` / `.cpp` | Servidor BLE que atiende al teléfono Android (último comando gana; limpieza al desconectar) |
+| `CommandParser.h` / `.cpp` | Validación estricta del protocolo del teléfono (lógica pura, testeable) |
 | `GamepadController.h` / `.cpp` | Cliente BLE: escaneo, identificación, conexión, pairing, HID, suscripción y reconexión |
 | `GamepadFilter.h` | Identificación estricta del Xbox 1708 (lógica pura, testeable) |
 | `GamepadInputState.h` | Validez del input (Estado 4) y watchdog (lógica pura, testeable) |
 | `GamepadParser.h` / `.cpp` | Convierte el reporte HID del mando en un estado normalizado (deadzone y polaridad) |
 | `GamepadMixer.h` / `.cpp` | Mezcla diferencial: estado del mando → velocidad de cada motor |
 | `MotorController.h` / `.cpp` | Control del PWM y del sentido de giro del TB6612 |
-| `SafetyManager.h` | Watchdog de seguridad del teléfono |
+| `SafetyManager.h` | Máquina de estados de seguridad y watchdog de comandos válidos del teléfono |
 | `StatusLed.h` / `.cpp` | Indicador LED de estado |
 
 ---
@@ -365,7 +388,7 @@ deadzone, reportes de 15/16/17 bytes, botones, mezcla), **filtro**
 | Parámetro | Ubicación | Valor por defecto |
 | :--- | :--- | :--- |
 | Nombre BLE del robot | `Sumo_AndinoA.ino` → `BleManager bluetooth(...)` | `Robotini16` |
-| Watchdog del teléfono | `Sumo_AndinoA.ino` → `COMMAND_TIMEOUT_MS` | 450 ms |
+| Watchdog del teléfono | `Sumo_AndinoA.ino` → `COMMAND_TIMEOUT_MS` | 250 ms |
 | Timeout de reports del mando | `GamepadController.h` → `GAMEPAD_TIMEOUT_MS` | 200 ms |
 | Timeout del primer reporte | `GamepadController.h` → `GAMEPAD_FIRST_REPORT_TIMEOUT_MS` | 1000 ms |
 | Timeout de conexión BLE | `GamepadController.h` → `GAMEPAD_CONNECT_TIMEOUT_MS` | 2000 ms |
@@ -374,6 +397,8 @@ deadzone, reportes de 15/16/17 bytes, botones, mezcla), **filtro**
 | Company ID de Microsoft | `GamepadFilter.h` → `MICROSOFT_COMPANY_ID` | `0x0006` |
 | Deadzone de los sticks | `GamepadParser.cpp` → `GAMEPAD_DEADZONE_PERCENT` | 10 % |
 | Debug del mando (Serial) | `Sumo_AndinoA.ino` → `GAMEPAD_DEBUG` | 0 (apagado) |
+| Debug de comandos App | `Sumo_AndinoA.ino` → `BLE_DEBUG` | 0 (apagado) |
+| Debug de seguridad | `Sumo_AndinoA.ino` → `SAFETY_DEBUG` | 0 (apagado) |
 | Debug de escaneo (dirección, RSSI...) | `GamepadController.h` → `GAMEPAD_DEBUG_SCAN` | 0 (apagado) |
 | Dump de reports HID | `GamepadController.h` → `DEBUG_GAMEPAD_REPORTS` | 0 (apagado) |
 

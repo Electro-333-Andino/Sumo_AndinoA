@@ -51,19 +51,15 @@
 #define GAMEPAD_MAX_REPORT_LEN 20
 
 // DEBUG DE REPORTS HID: 1 = volcar por Serial la longitud, los bytes en hex
-// y los sticks decodificados (con throttle ~100 ms); 0 = silencio.
-// TEMPORAL: activado (1) para diagnóstico del mando en el monitor serie;
-// volver a 0 en el firmware final.
+// y los sticks decodificados (con throttle ~100 ms); 0 = silencio (default).
 #ifndef DEBUG_GAMEPAD_REPORTS
-#define DEBUG_GAMEPAD_REPORTS 1
+#define DEBUG_GAMEPAD_REPORTS 0
 #endif
 
 // DEBUG DE ESCANEO: 1 = imprime por dispositivo visto su dirección, nombre,
-// RSSI, appearance y manufacturer data; 0 = solo logs de etapa (producción).
-// TEMPORAL: activado (1) para diagnóstico del mando en el monitor serie;
-// volver a 0 en el firmware final.
+// RSSI, appearance y manufacturer data; 0 = solo logs de etapa (default).
 #ifndef GAMEPAD_DEBUG_SCAN
-#define GAMEPAD_DEBUG_SCAN 1
+#define GAMEPAD_DEBUG_SCAN 0
 #endif
 
 // Callback de seguridad: se invoca para detener el robot ante desconexión,

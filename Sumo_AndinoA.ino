@@ -20,6 +20,7 @@
 #include "SafetyManager.h"
 #include "GamepadController.h"
 #include "GamepadMixer.h"
+#include "CommandParser.h"
 #include <Preferences.h>
 #include <Esp.h>
 
@@ -51,18 +52,26 @@
 
 #define PIN_STBY 7
 
-// Watchdog del teléfono: si no llega un comando en este tiempo, parada preventiva
-#define COMMAND_TIMEOUT_MS 450
+// Watchdog del teléfono: si no llega un comando VÁLIDO en este tiempo, parada
+// preventiva. La app envía cada ~50 ms; 250 ms es seguro y no dispara en falso.
+#define COMMAND_TIMEOUT_MS 250
 
-// --- VELOCIDADES POR DEFECTO (0 a 1023) ---
-uint16_t DEFAULT_SPEED_LEFT  = 1023;
-uint16_t DEFAULT_SPEED_RIGHT = 1023;
-uint16_t DEFAULT_TURN_SPEED  = 1023;
+// --- VELOCIDAD POR DEFECTO (0 a 1023) ---
+// Se aplica a los giros "L"/"R" sin velocidades explícitas de la app.
+uint16_t DEFAULT_TURN_SPEED = 1023;
 
-// DEBUG DEL MANDO: 1 = imprime RAW/NORMALIZADO/SALIDA por Serial; 0 = silencio
-// TEMPORAL: activado (1) para diagnóstico; volver a 0 en el firmware final.
+// --- DEBUG (todo desactivado por defecto; activar solo para diagnóstico) ---
+// GAMEPAD_DEBUG: estado RAW/normalizado/salida del mando (modo Xbox)
+// BLE_DEBUG:     comandos recibidos del teléfono (modo App)
+// SAFETY_DEBUG:  transiciones de la máquina de seguridad (solo cambios de estado)
 #ifndef GAMEPAD_DEBUG
-#define GAMEPAD_DEBUG 1
+#define GAMEPAD_DEBUG 0
+#endif
+#ifndef BLE_DEBUG
+#define BLE_DEBUG 0
+#endif
+#ifndef SAFETY_DEBUG
+#define SAFETY_DEBUG 0
 #endif
 
 // --- INSTANCIACIÓN ---
@@ -84,6 +93,8 @@ uint8_t opMode = MODE_APP;
 
 // Persiste el modo nuevo en NVS y reinicia para arrancar en él.
 void setModeAndRestart(uint8_t newMode) {
+  robot.emergencyStop(); // nunca cambiar de modo con los motores activos
+
   Preferences prefs;
   prefs.begin(NVS_NAMESPACE, false);
   prefs.putUChar(NVS_KEY_MODE, newMode);
@@ -99,70 +110,62 @@ void setModeAndRestart(uint8_t newMode) {
 // Se ejecuta desde el callback de desconexión BLE (posiblemente otra tarea):
 // solo toca pines, nada de heap ni Strings.
 void safetyStop() {
+#if SAFETY_DEBUG
+  Serial.println("[SAFETY] BLE DISCONNECTED -> STOP");
+#endif
   robot.emergencyStop(); // corte duro: STBY a LOW, el TB6612 queda en alta impedancia
 }
 
 // El mando invoca este callback ante desconexión, timeout de reports o antes
 // de un intento de conexión (que bloquea loop() unos segundos).
 void gamepadStop() {
+#if SAFETY_DEBUG
+  Serial.println("[SAFETY] GAMEPAD TIMEOUT -> STOP");
+#endif
   robot.emergencyStop();
 }
 
 // --- RUTINAS DE CONTROL (Modo App) ---
 
-// Comando del teléfono: interpreta los comandos de movimiento del protocolo
-// Android (F, B, L, R, S).
+// Comando del teléfono: valida ESTRICTAMENTE el protocolo SparkPilot y ejecuta
+// el movimiento. Un comando inválido NO alimenta el watchdog y dispara parada
+// de seguridad (el robot no se conserva vivo con paquetes corruptos).
 void processPhoneCommand(char* packet) {
-  char command = 'S';
-  int vLeftInput = DEFAULT_SPEED_LEFT;
-  int vRightInput = DEFAULT_SPEED_RIGHT;
+  ParsedCommand cmd = CommandParser::parse(packet, strlen(packet), DEFAULT_TURN_SPEED);
 
-  int fieldsRead = sscanf(packet, "%c,%d,%d", &command, &vLeftInput, &vRightInput);
+  if (!cmd.valid) {
+    safety.onCommandRejected(); // emergencyStop + estado EMERGENCY_STOP
+#if BLE_DEBUG
+    Serial.print("[BLE] Invalid command: '");
+    Serial.print(packet);
+    Serial.println("'");
+#endif
+    return;
+  }
 
-  uint16_t speedL = constrain(vLeftInput, 0, 1023);
-  uint16_t speedR = constrain(vRightInput, 0, 1023);
+  // Único punto que alimenta el watchdog del teléfono: comando VALIDADO.
+  safety.onCommandAccepted(cmd.command != 'S');
 
   // La velocidad configurada por Android se guarda para el modo Xbox
-  if ((command == 'F' || command == 'B' || command == 'L' || command == 'R') &&
-      fieldsRead == 3) {
-    uint16_t maxSpeed = max(speedL, speedR);
+  if (cmd.command != 'S') {
+    uint16_t maxSpeed = max(cmd.speedLeft, cmd.speedRight);
     if (maxSpeed > 0) configuredSpeed = maxSpeed;
   }
 
-  switch (command) {
-    case 'F':
-      robot.moveForward(speedL, speedR);
-      break;
-
-    case 'B':
-      robot.moveBackward(speedL, speedR);
-      break;
-
-    case 'L':
-      if (fieldsRead == 3) {
-        robot.turnLeft(speedL, speedR);
-      } else {
-        robot.turnLeft(DEFAULT_TURN_SPEED, DEFAULT_TURN_SPEED);
-      }
-      break;
-
-    case 'R':
-      if (fieldsRead == 3) {
-        robot.turnRight(speedL, speedR);
-      } else {
-        robot.turnRight(DEFAULT_TURN_SPEED, DEFAULT_TURN_SPEED);
-      }
-      break;
-
+  switch (cmd.command) {
+    case 'F': robot.moveForward(cmd.speedLeft, cmd.speedRight); break;
+    case 'B': robot.moveBackward(cmd.speedLeft, cmd.speedRight); break;
+    case 'L': robot.turnLeft(cmd.speedLeft, cmd.speedRight); break;
+    case 'R': robot.turnRight(cmd.speedLeft, cmd.speedRight); break;
     case 'S':
-    default:
-      robot.stop();
-      break;
+    default:  robot.stop(); break; // parada normal (no es condición de fallo)
   }
 
-  Serial.print("Cmd: "); Serial.print(command);
-  Serial.print(" | Izq: "); Serial.print(speedL);
-  Serial.print(" | Der: "); Serial.println(speedR);
+#if BLE_DEBUG
+  Serial.print("[BLE] Cmd: "); Serial.print(cmd.command);
+  Serial.print(" | Izq: "); Serial.print(cmd.speedLeft);
+  Serial.print(" | Der: "); Serial.println(cmd.speedRight);
+#endif
 }
 
 // --- RUTINAS DE CONTROL (Modo Xbox) ---
@@ -170,6 +173,13 @@ void processPhoneCommand(char* packet) {
 // Control con el mando: re-aplica el estado a 50 Hz. Si no llegan reports,
 // GamepadController ya detiene el robot por timeout (200 ms).
 void processGamepadControl() {
+  // Defensa en profundidad: sin input válido (Estado 4) jamás se escriben
+  // los motores, aunque algo llame a esta rutina por error.
+  if (!gamepad.isInputActive()) {
+    robot.emergencyStop();
+    return;
+  }
+
   static unsigned long lastMotorUpdate = 0;
   static unsigned long lastPadLog = 0;
   unsigned long now = millis();
@@ -243,6 +253,7 @@ void blinkModeLed() {
 
 void setupAppMode() {
   Serial.println("Modo: APP (BLE Android)");
+  safety.begin(); // arranque seguro: motores detenidos, esperando comandos
   bluetooth.setSafetyStopCallback(safetyStop);
   bluetooth.begin();
 }
@@ -260,7 +271,7 @@ void loopAppMode() {
   statusLed.setConnected(bluetooth.isConnected());
   statusLed.update();
 
-  safety.check(); // watchdog del teléfono (450 ms sin comandos)
+  safety.update(); // watchdog de comandos válidos (250 ms) + máquina de estados
 
   char packet[BLE_CMD_BUFFER_SIZE];
   if (bluetooth.getCommand(packet, sizeof(packet))) {
@@ -305,6 +316,7 @@ void setup() {
     // 4. Inicialización común a ambos modos
     statusLed.begin();
     robot.begin();
+    robot.emergencyStop(); // el robot arranca SIEMPRE detenido
 
     // 5. Inicialización EXCLUSIVA: solo el stack BLE del modo activo
     if (opMode == MODE_APP) {

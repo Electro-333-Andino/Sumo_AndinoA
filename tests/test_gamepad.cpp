@@ -20,6 +20,7 @@
 #include "GamepadMixer.h"
 #include "GamepadFilter.h"
 #include "GamepadInputState.h"
+#include "CommandParser.h"
 
 static int failures = 0;
 
@@ -327,6 +328,161 @@ static void testWatchdog(GamepadMixer& mixer, int16_t MAX) {
   check("W7 motors move again", o4.left, MAX);
 }
 
+// ---------------------------------------------------------------------------
+// 4. COMMAND PARSER — validación estricta del protocolo del teléfono
+// ---------------------------------------------------------------------------
+static void testCommandParser() {
+  printf("--- CommandParser (protocolo SparkPilot) ---\n");
+  const uint16_t TURN = 1023; // DEFAULT_TURN_SPEED
+
+  // C1..C5 — Movimientos con velocidades válidas
+  {
+    ParsedCommand c = CommandParser::parse("F,1023,1023", 11, TURN);
+    check("C1 F valid", (int32_t)c.valid, 1);
+    check("C1 F cmd", (int32_t)c.command, (int32_t)'F');
+    check("C1 F speeds", (int32_t)c.speedLeft * 10000 + c.speedRight, 10231023);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,0,0", 5, TURN);
+    check("C2 F zero", (int32_t)c.valid, 1);
+    check("C2 speeds zero", (int32_t)(c.speedLeft + c.speedRight), 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("B,500,300", 9, TURN);
+    check("C3 B valid", (int32_t)c.valid && c.command == 'B', 1);
+    check("C3 B speeds", (int32_t)c.speedLeft * 10000 + c.speedRight, 5000300);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("L,700,700", 9, TURN);
+    check("C4 L valid", (int32_t)c.valid && c.command == 'L', 1);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("R,100,200", 9, TURN);
+    check("C5 R valid", (int32_t)c.valid && c.command == 'R', 1);
+  }
+
+  // C6..C9 — Stop y giros sin velocidades (compatibilidad SparkPilot)
+  {
+    ParsedCommand c = CommandParser::parse("S", 1, TURN);
+    check("C6 S valid", (int32_t)c.valid && c.command == 'S', 1);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("S\r\n", 3, TURN); // CRLF tolerado
+    check("C7 S with CRLF", (int32_t)c.valid && c.command == 'S', 1);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("L", 1, TURN);
+    check("C8 L no speeds", (int32_t)c.valid && c.speedLeft == TURN && c.speedRight == TURN, 1);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("R", 1, TURN);
+    check("C9 R no speeds", (int32_t)c.valid && c.speedLeft == TURN, 1);
+  }
+
+  // C10..C23 — Inválidos: no alimentan el watchdog y no mueven el robot
+  {
+    ParsedCommand c = CommandParser::parse("", 0, TURN);
+    check("C10 empty rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("X,100,100", 9, TURN);
+    check("C11 unknown cmd rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F", 1, TURN);
+    check("C12 F alone rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,700", 5, TURN);
+    check("C13 one speed rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,700,800,900", 13, TURN);
+    check("C14 extra text rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,-5,100", 8, TURN);
+    check("C15 negative rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,2000,100", 10, TURN);
+    check("C16 range left rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,100,2000", 10, TURN);
+    check("C17 range right rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,abc,100", 9, TURN);
+    check("C18 non numeric rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F,100,", 6, TURN);
+    check("C19 missing value rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse(",100,100", 8, TURN);
+    check("C20 no command rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("F, 100,100", 10, TURN);
+    check("C21 space rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse(nullptr, 0, TURN);
+    check("C22 null rejected", (int32_t)c.valid, 0);
+  }
+  {
+    ParsedCommand c = CommandParser::parse("S,100,100", 9, TURN);
+    check("C23 S with params rejected", (int32_t)c.valid, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. WATCHDOG APP — comandos válidos del teléfono (timeout 250 ms)
+// ---------------------------------------------------------------------------
+static void testAppWatchdog(GamepadMixer& mixer, int16_t MAX) {
+  printf("--- Watchdog APP (comandos válidos, 250 ms) ---\n");
+  const uint32_t TIMEOUT = 250;
+
+  // A1 — Sin comando válido: el robot no se mueve (arranque)
+  GamepadInputState app;
+  GamepadState st; memset(&st, 0, sizeof(st));
+  st.leftY = 1000; // último "comando" recibido
+  check("A1 start stopped", (int32_t)app.isValid(), 0);
+  MotorOutput o0 = app.isValid() ? mixer.calculate(st, MAX) : MotorOutput{0, 0};
+  check("A1 motors stopped", o0.left, 0);
+
+  // A2 — Comando VÁLIDO (F,600,600): alimenta el watchdog y mueve
+  app.markValid(1000);
+  check("A2 valid command feeds", (int32_t)app.isValid(), 1);
+  MotorOutput o1 = app.isValid() ? mixer.calculate(st, MAX) : MotorOutput{0, 0};
+  check("A2 motors move", o1.left, MAX);
+
+  // A3 — Timeout de 250 ms superado: STOP y comando NO reaplicado
+  check("A3 timeout", (int32_t)app.checkValid(2000, TIMEOUT), 0);
+  check("A3 invalid flag", (int32_t)app.isValid(), 0);
+  MotorOutput o2 = app.isValid() ? mixer.calculate(st, MAX) : MotorOutput{0, 0};
+  check("A3 motors stopped", o2.left, 0);
+
+  // A4 — Comando INVÁLIDO: no alimenta el watchdog (el robot no se conserva vivo)
+  app.invalidate();
+  // ...llega un paquete corrupto, markValid NO se llama...
+  check("A4 invalid keeps stopped", (int32_t)app.isValid(), 0);
+  MotorOutput o3 = app.isValid() ? mixer.calculate(st, MAX) : MotorOutput{0, 0};
+  check("A4 motors stopped", o3.left, 0);
+
+  // A5 — Recuperación: solo un comando VÁLIDO nuevo restaura el control
+  app.markValid(3000);
+  check("A5 recovered", (int32_t)app.isValid(), 1);
+  MotorOutput o4 = app.isValid() ? mixer.calculate(st, MAX) : MotorOutput{0, 0};
+  check("A5 motors move again", o4.left, MAX);
+
+  // A6 — Stop normal (S): el último comando no se reaplica automáticamente
+  app.markValid(4000);
+  check("A6 S within timeout", (int32_t)app.checkValid(4100, TIMEOUT), 1);
+}
+
 int main() {
   GamepadParser parser;
   GamepadMixer mixer;
@@ -335,6 +491,8 @@ int main() {
   testParser(parser, mixer, MAX);
   testFilter();
   testWatchdog(mixer, MAX);
+  testCommandParser();
+  testAppWatchdog(mixer, MAX);
 
   printf(failures == 0 ? "\nALL TESTS PASSED\n" : "\n%d FAILURES\n", failures);
   return failures;

@@ -34,10 +34,8 @@ public:
     bool isConnected();
 
     // Copia el último comando a buffer (thread-safe). Retorna false si no hay nada nuevo.
+    // Último comando gana (latest command wins): no hay cola de comandos.
     bool getCommand(char* buffer, size_t bufferSize);
-
-    // Milisegundos transcurridos desde el último comando recibido (para watchdog)
-    unsigned long millisSinceLastCommand();
 
     // Se ejecuta inmediatamente cuando el BLE se desconecta (ideal para robot.stop())
     void setSafetyStopCallback(SafetyStopCallback cb);
@@ -52,7 +50,6 @@ private:
     char lastCommand[BLE_CMD_BUFFER_SIZE];
     volatile bool connected;
     volatile bool commandReady;
-    volatile unsigned long lastCommandMillis;
 
     portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
     SafetyStopCallback safetyStopCb;

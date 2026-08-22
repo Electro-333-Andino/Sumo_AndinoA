@@ -61,8 +61,8 @@ static RxCallbacks rxCallbacks;
 
 BleManager::BleManager(const char* name)
     : deviceName(name), connected(false), commandReady(false),
-      lastCommandMillis(0), safetyStopCb(nullptr) {
-    lastCommand[0] = 'S';
+      safetyStopCb(nullptr) {
+    lastCommand[0] = 'S'; // estado seguro por defecto: nunca mover sin comando
     lastCommand[1] = '\0';
     instance = this;
 }
@@ -103,11 +103,16 @@ void BleManager::setConnectionState(bool state) {
     connected = state;
     if (state) {
         // Al conectarse el teléfono puede tardar en enviar su primer comando:
-        // reiniciar el contador evita un falso disparo del watchdog
-        // (millis() - 0 sería un valor enorme en millisSinceLastCommand()).
-        lastCommandMillis = millis();
-    } else if (safetyStopCb != nullptr) {
-        safetyStopCb(); // Frena motores en el instante mismo de la desconexión
+        // el watchdog lo reinicia SafetyManager al entrar en WAITING_FOR_COMMAND.
+    } else {
+        // Desconexión -> estado seguro: se descarta cualquier comando pendiente
+        // para que NUNCA se reutilice el último comando tras una reconexión.
+        lastCommand[0] = 'S';
+        lastCommand[1] = '\0';
+        commandReady = false;
+        if (safetyStopCb != nullptr) {
+            safetyStopCb(); // Frena motores en el instante mismo de la desconexión
+        }
     }
 }
 
@@ -120,7 +125,8 @@ void BleManager::setReceivedCommand(const char* cmd, size_t len) {
     memcpy(lastCommand, cmd, len);
     lastCommand[len] = '\0';
     commandReady = true;
-    lastCommandMillis = millis();
+    // NOTA: el watchdog NO se alimenta aquí. Solo un comando validado por
+    // CommandParser (F/B/L/R/S correctos) lo reinicia vía SafetyManager.
     portEXIT_CRITICAL(&mux);
 }
 
@@ -138,13 +144,6 @@ bool BleManager::getCommand(char* buffer, size_t bufferSize) {
     }
     portEXIT_CRITICAL(&mux);
     return tenemosComando;
-}
-
-unsigned long BleManager::millisSinceLastCommand() {
-    portENTER_CRITICAL(&mux);
-    unsigned long delta = millis() - lastCommandMillis;
-    portEXIT_CRITICAL(&mux);
-    return delta;
 }
 
 void BleManager::setSafetyStopCallback(SafetyStopCallback cb) {
